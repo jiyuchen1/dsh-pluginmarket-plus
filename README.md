@@ -2,6 +2,22 @@
 
 把「插件 → 发现」读取的索引 JSON 缓存到本地磁盘：手动刷新、每几小时自动刷新，并让发现页直接读本地镜像，绕开上游索引超时。
 
+## 安装
+
+从 npm（发布后）：
+
+```sh
+dsh plugin --profile web add dsh-pluginmarket-plus
+```
+
+直接从 GitHub：
+
+```sh
+dsh plugin --profile web add github:jiyuchen1/dsh-pluginmarket-plus
+```
+
+安装后重启 `dsh web`（或在桌面应用的插件页安装并重启），然后打开 **设置 → 插件市场缓存**。
+
 ## 为什么需要它
 
 官方插件市场（`plugin-market` 服务）读取索引时单次抓取限时 **15 秒**、失败不落盘，也不会沿用上一份成功的结果。真实索引很大，实测（2026-11-14，本机直连）：
@@ -57,3 +73,7 @@
 - `lib/store.js` — 磁盘缓存与状态清单（原子写）。
 - `lib/refresh.js` — 抓取、最小格式校验、相对 icon 改写。
 - `client.js` — 设置页（无构建步骤，React 来自宿主模块表）。
+
+## License
+
+MIT © 2026 jiyuchen1
