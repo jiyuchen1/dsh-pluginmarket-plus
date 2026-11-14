@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Plugin market cache",
+    "description": "Caches the index JSON that Plugins → Discover reads on local disk, refreshed manually or every few hours. With takeover enabled, Discover index sources point at a local mirror, so opening and searching are instant instead of failing on an upstream index timeout. Disable the plugin or the takeover switch to restore the upstream URLs."
+  }
+}

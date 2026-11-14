@@ -1,0 +1,24 @@
+# dsh-pluginmarket-plus —— 把插件市场索引缓存到本地
+#
+# 一个 profile 行：Host 半边负责抓取/落盘/定时刷新/本地镜像，Client 半边注册设置页。
+# 面板上可改的字段都是 volatile，改完立即生效，不必重载插件。
+- insert:
+    - id: pluginmarket-plus
+      name: 'dsh-pluginmarket-plus'
+      config:
+        # 是否按间隔自动刷新（默认开）。
+        autoRefresh: true
+        # 自动刷新间隔（小时），默认 4 小时。
+        refreshIntervalHours: 4
+        # 是否让「插件 → 发现」使用本地镜像（默认开；只替换已缓存成功的源）。
+        managePluginMarket: true
+        # 单次抓取超时（毫秒）。索引可能有几 MB，默认给到 2 分钟。
+        fetchTimeoutMs: 120000
+        # 单个索引正文上限（字节），默认 64 MiB。
+        maxBytes: 67108864
+        # 失败重试次数。
+        retries: 2
+        # 缓存目录，相对 profile 目录。
+        cacheDir: '.pluginmarket-plus'
+        # 索引源列表；留空则自动接管「发现」页当前配置的源。
+        sources: []

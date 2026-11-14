@@ -1,0 +1,60 @@
+{
+  "name": "dsh-pluginmarket-plus",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local disk cache for plugin market index JSON: manual and scheduled refresh, plus a local mirror that the built-in Discover page can read instead of the slow upstream indexes.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "icon": "icon.svg",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "dsh-bundle",
+    "plugin-market",
+    "cache",
+    "index"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}
