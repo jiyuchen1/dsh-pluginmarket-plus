@@ -5,10 +5,10 @@
  * 用最小 React 垫片 + 假 __ModuleLoader__ 装载 client.js，检查：
  *   1. plugins.tab 席位注册（name/id/order/label 走 ctx.locale，中文「可更新」）；
  *   2. 检查更新 / 统计条 / 过滤 / 搜索 / 两个开关（POST /settings 持久化）；
- *   3. 行的复选框、名称、当前→目标版本、registry/git 徽标、状态徽标、[更新]/[详情]（openPackage）；
+ *   3. 行的复选框、插件名（点击即 openPackage）、当前→目标版本、registry/git 徽标、状态徽标、[更新]；
  *   4. 全选 + 半选、底部批量栏、[一键更新]、[更新全部]（跳过不兼容项）；
  *   5. 更新确认框（版本、来源、回滚说明）→ POST /updates/apply → 进度轮询（阶段/日志/取消）→ 汇总；
- *   6. 不兼容行展开（不满足项）+ 版本豁免：勾选风险 → 二次确认 → POST /updates/exempt {acceptRisk:true}；
+ *   6. 不兼容行的「版本豁免」入口：勾选风险 → 二次确认 → POST /updates/exempt {acceptRisk:true} → 自动 apply；
  *   7. 只 require('react')、不 import @deepseek-ai、CSS 只用 --dsw-alias-* token、注册全部经 ctx.effect。
  *
  * 用法：node tools/client-selftest.mjs
@@ -388,6 +388,75 @@ async function clickModalButton(context, label) {
 }
 
 /**
+ * 行主布局：按顺序返回 pmu-rowMain 的子元素标记。
+ * @param {object} context - 渲染上下文。
+ * @param {string} name - 包名。
+ * @returns {string[]} 标记数组。
+ */
+function rowLayout(context, name) {
+  const main = rowMain(context, name)
+  const markers = []
+  for (const el of main.rendered ?? []) {
+    if (el === null || typeof el !== 'object') continue
+    if (el.type === 'input') { markers.push('checkbox'); continue }
+    const classes = String(el.props?.className ?? '').split(/\s+/u)
+    if (classes.includes('pmu-name') || classes.includes('pmu-nameLink')) markers.push('name')
+    else if (classes.includes('pmu-kindBadge')) markers.push('kind')
+    else if (classes.includes('pmu-versions')) markers.push('versions')
+    else if (classes.includes('pmu-spacer')) markers.push('spacer')
+    else if (classes.includes('pmu-disabledBadge')) markers.push('disabled')
+    else if (classes.includes('pmu-statusBadge')) markers.push('status')
+    else if (classes.includes('pmu-rowActions')) markers.push('actions')
+  }
+  return markers
+}
+
+/**
+ * 取行主区（pmu-rowMain）元素。
+ * @param {object} context - 渲染上下文。
+ * @param {string} name - 包名。
+ * @returns {object} 元素。
+ */
+function rowMain(context, name) {
+  const main = collect(rowFor(context, name)).find(el => el.type === 'div' && el.props.className === 'pmu-rowMain')
+  if (main === undefined) throw new Error(`找不到 ${name} 的 pmu-rowMain`)
+  return main
+}
+
+/**
+ * 从 CSS 文本里取某个选择器的声明块。
+ * @param {string} css - 样式表文本。
+ * @param {string} selector - 选择器（精确匹配 `selector{`）。
+ * @returns {string} 声明块内容。
+ */
+function cssRule(css, selector) {
+  const start = css.indexOf(`${selector}{`)
+  if (start === -1) return ''
+  const bodyStart = start + selector.length + 1
+  return css.slice(bodyStart, css.indexOf('}', bodyStart))
+}
+
+/**
+ * 找某行的主状态徽标。
+ * @param {object} context - 渲染上下文。
+ * @param {string} name - 包名。
+ * @returns {object|undefined} 徽标元素。
+ */
+function statusBadge(context, name) {
+  return collect(rowFor(context, name)).find(el => String(el.props?.className ?? '').includes('pmu-statusBadge'))
+}
+
+/**
+ * 找某行的来源徽标。
+ * @param {object} context - 渲染上下文。
+ * @param {string} name - 包名。
+ * @returns {object|undefined} 徽标元素。
+ */
+function kindBadge(context, name) {
+  return collect(rowFor(context, name)).find(el => String(el.props?.className ?? '').includes('pmu-kindBadge'))
+}
+
+/**
  * 找输入元素。
  * @param {object} context - 渲染上下文。
  * @param {string} ariaLabel - aria-label。
@@ -584,9 +653,9 @@ function defaultFetch(options = {}) {
 /** 假候选列表：字段与 Host 桥（t1）一致。 */
 const CANDIDATES = [
   {
-    name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', kind: 'registry', state: 'available',
+    name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', kind: 'npm', state: 'available',
     enabled: true, incompatible: null, prerelease: false, deprecated: null,
-    spec: 'demo-plugin-a@1.2.0', origin: 'registry',
+    spec: 'demo-plugin-a@1.2.0',
   },
   {
     name: 'demo-plugin-b', current: '0.9.1', latest: '1.0.0', kind: 'git', state: 'available',
@@ -595,9 +664,9 @@ const CANDIDATES = [
     origin: 'github.com/x/demo-b.git  /packages/b',
   },
   {
-    name: 'demo-plugin-c', current: '2.0.0', latest: '3.0.0', kind: 'registry', state: 'available',
+    name: 'demo-plugin-c', current: '2.0.0', latest: '3.0.0', kind: 'npm', state: 'available',
     enabled: true, prerelease: false, deprecated: null,
-    spec: 'demo-plugin-c@2.0.0', origin: 'registry',
+    spec: 'demo-plugin-c@2.0.0',
     // 真实 Host 形状（DSH evaluatePluginCompatibility → incompatiblePlugin），不是布尔：
     // { name, version, runtimeVersion, requirements: { 'engines.dsh': '>=0.4.0 <0.5.0' } }
     incompatible: {
@@ -608,26 +677,26 @@ const CANDIDATES = [
     },
   },
   {
-    name: 'demo-plugin-d', current: '1.0.0', latest: '1.1.0-rc.1', kind: 'registry', state: 'skipped',
+    name: 'demo-plugin-d', current: '1.0.0', latest: '1.1.0-rc.1', kind: 'npm', state: 'skipped',
     enabled: true, incompatible: null, prerelease: true, deprecated: null,
-    spec: 'demo-plugin-d@1.0.0', origin: 'registry',
+    spec: 'demo-plugin-d@1.0.0',
   },
   {
-    name: 'demo-plugin-e', current: '0.4.0', latest: '0.5.0', kind: 'registry', state: 'available',
+    name: 'demo-plugin-e', current: '0.4.0', latest: '0.5.0', kind: 'npm', state: 'available',
     enabled: false, incompatible: null, prerelease: false, deprecated: null,
-    spec: 'demo-plugin-e@0.4.0', origin: 'registry',
+    spec: 'demo-plugin-e@0.4.0',
   },
   {
-    name: 'demo-plugin-f', current: '1.0.0', latest: '', kind: 'registry', state: 'error',
+    name: 'demo-plugin-f', current: '1.0.0', latest: '', kind: 'npm', state: 'error',
     enabled: true, incompatible: null, prerelease: false, deprecated: null, error: 'registry timeout',
   },
   {
     name: 'demo-plugin-g', current: '1.0.0', latest: '', kind: 'git', state: 'uncheckable',
-    enabled: true, incompatible: null, prerelease: false, deprecated: null,
+    enabled: true, incompatible: null, prerelease: false, deprecated: null, reason: 'index-miss',
   },
   {
     name: 'demo-plugin-h', current: '1.0.0', latest: '1.0.0', kind: 'registry', state: 'current',
-    enabled: true, incompatible: null, prerelease: false, deprecated: null, origin: 'registry',
+    enabled: true, incompatible: null, prerelease: false, deprecated: null,
   },
 ]
 
@@ -739,7 +808,7 @@ test('检查更新按钮与统计条', async () => {
   context.unmount()
 })
 
-test('行渲染：复选框 / 版本 / 徽标 / 按钮 / openPackage', async () => {
+test('行渲染：复选框 / 版本 / 徽标 / 名称即详情 / openPackage', async () => {
   bootClient()
   fakeFetch = defaultFetch()
   const opened = []
@@ -747,16 +816,210 @@ test('行渲染：复选框 / 版本 / 徽标 / 按钮 / openPackage', async () 
   const text = allText(context)
   ok(text.includes('demo-plugin-a'), '显示包名')
   ok(text.includes('1.2.0') && text.includes('1.4.2'), '显示 当前 → 目标 版本')
-  ok(text.includes('registry') && text.includes('git'), '显示 registry / git 徽标')
+  ok(text.includes('npm') && text.includes('git'), '显示 npm / git 来源徽标')
+  ok(!text.includes('registry'), '不再显示旧的 registry 字样')
   ok(text.includes('可更新') && text.includes('不兼容') && text.includes('预发布') && text.includes('检查失败') && text.includes('无法检查') && text.includes('无更新'), '显示状态徽标（可更新/不兼容/预发布/检查失败/无法检查/无更新）')
   ok(text.includes('demo-plugin-g') && text.includes('无法检查'), 'uncheckable 的 Git 行显示「无法检查」')
   ok(!text.includes('demo-plugin-e'), '「包含已禁用」默认关：已禁用插件不显示')
   const checkboxes = collect(context.result).filter(el => el.type === 'input' && el.props.type === 'checkbox')
   eq(checkboxes.length, 8, '每行一个复选框（7 行可见 + 全选）')
-  clickButton(context, '详情')
-  eq(opened.length, 1, '[详情] 调用 owner props openPackage(name)')
-  eq(opened[0], 'demo-plugin-a', '详情传到的是这一行的包名')
+  // 详情按钮已删除，功能移到插件名称上。
+  const buttons = collect(context.result).filter(el => el.type === 'button')
+  ok(!buttons.some(el => nodeText(el).trim() === '详情'), '行内不再渲染「详情」按钮')
+  const nameButtons = buttons.filter(el => String(el.props.className ?? '').includes('pmu-nameLink'))
+  eq(nameButtons.length, 7, '每个可见行的插件名称都是可点击控件')
+  const nameButton = nameButtons.find(el => nodeText(el).trim() === 'demo-plugin-a')
+  ok(nameButton !== undefined, '插件名称是可点击控件')
+  eq(nameButton?.props.type, 'button', '插件名称是 button 语义（可键盘聚焦）')
+  nameButton?.props.onClick()
+  await settle(context)
+  eq(opened.length, 1, '点击插件名 → 调用 owner props openPackage(name)')
+  eq(opened[0], 'demo-plugin-a', 'openPackage 收到该行的包名')
   context.unmount()
+})
+
+test('行布局：复选框→名称→来源→版本→空隙→已禁用→主状态→操作（8 列固定顺序）', async () => {
+  bootClient()
+  fakeFetch = defaultFetch()
+  const context = await renderUpdates()
+  const normal = ['checkbox', 'name', 'kind', 'versions', 'spacer', 'status', 'actions']
+  eq(JSON.stringify(rowLayout(context, 'demo-plugin-a')), JSON.stringify(normal), 'npm 行顺序：复选框→名称→来源→版本→空隙→(已禁用空列)→主状态→操作')
+  eq(JSON.stringify(rowLayout(context, 'demo-plugin-b')), JSON.stringify(normal), 'git 行顺序一致')
+  eq(JSON.stringify(rowLayout(context, 'demo-plugin-f')), JSON.stringify(normal), '检查失败行顺序一致')
+  // 旧 kind:'registry' 归一为 npm
+  eq(nodeText(kindBadge(context, 'demo-plugin-h')).trim(), 'npm', '旧 registry 归一后显示 npm 徽标')
+  eq(nodeText(kindBadge(context, 'demo-plugin-b')).trim(), 'git', 'git 行显示 git 徽标')
+  // 来源徽标在版本变动之前；已禁用列始终占位（不是已禁用时为空）
+  const order = rowLayout(context, 'demo-plugin-a')
+  ok(order.indexOf('kind') < order.indexOf('versions'), '来源徽标在版本变动之前')
+  ok(!order.includes('disabled'), '非禁用行不渲染已禁用徽标（该列由共享模板空占位）')
+  ok(order.indexOf('status') === order.indexOf('actions') - 1, '主状态紧邻操作列左侧')
+  // 打开「包含已禁用」后：已禁用徽标出现在该列里
+  const switches = collect(context.result).filter(el => el.type === 'button' && el.props.role === 'switch')
+  switches[1].props.onClick()
+  await settle(context)
+  const disabledLayout = rowLayout(context, 'demo-plugin-e')
+  eq(JSON.stringify(disabledLayout), JSON.stringify(['checkbox', 'name', 'kind', 'versions', 'spacer', 'disabled', 'status', 'actions']), '已禁用行：已禁用徽标插在主状态列左侧')
+  ok(nodeText(rowMain(context, 'demo-plugin-e')).includes('已禁用'), '已禁用徽标显示在已禁用列')
+  context.unmount()
+})
+
+test('行主区是共享列宽的 CSS Grid（固定轨道 + 名称省略 + 操作右对齐 + 窄屏）', () => {
+  const { component } = bootClient()
+  const css = component.inspectable().css
+  const main = cssRule(css, '.pmu-rowMain')
+  ok(/display:grid/u.test(main), '行主区 display:grid（不是 flex）')
+  const template = (main.match(/grid-template-columns:([^;}]*)/u) ?? [])[1]?.trim() ?? ''
+  ok(template !== '', '声明了 grid-template-columns')
+  const tracks = template.split(/\s+(?![^(]*\))/u)
+  eq(tracks.length, 8, `8 个列轨道（实际：${template}）`)
+  eq(tracks[0], 'auto', '第 1 列：复选框 auto')
+  ok(/^minmax\(0,\s*1fr\)$/u.test(tracks[1]), '第 2 列：插件名 minmax(0,1fr)（吃剩余空间、可省略）')
+  ok(/^\d+px$/u.test(tracks[2]), '第 3 列：更新来源固定 px 轨道')
+  ok(/^\d+px$/u.test(tracks[3]), '第 4 列：版本变动固定 px 轨道')
+  ok(/minmax\(/u.test(tracks[4]) || /^\d+px$/u.test(tracks[4]), '第 5 列：弹性空隙轨道')
+  ok(/^\d+px$/u.test(tracks[5]), '第 6 列：已禁用固定 px 轨道（空也占位）')
+  ok(/^\d+px$/u.test(tracks[6]), '第 7 列：主状态固定 px 轨道')
+  ok(/minmax\(/u.test(tracks[7]) || /^\d+px$/u.test(tracks[7]), '第 8 列：操作列有界轨道')
+  // 所有行共用同一模板：每行的 pmu-rowMain 都是同一 className、无内联 grid 覆盖
+  ok(!/grid-template-columns/u.test(css.slice(css.indexOf('.pmu-row['), css.indexOf('.pmu-rowMain'))), '行容器自身不另设模板（模板只来自共享类）')
+  // 名称省略
+  const name = cssRule(css, '.pmu-name')
+  ok(/text-overflow:ellipsis/u.test(name), '.pmu-name 有省略号')
+  ok(/overflow:hidden/u.test(name), '.pmu-name 裁剪溢出')
+  ok(/white-space:nowrap/u.test(name), '.pmu-name 不换行')
+  ok(/min-width:0/u.test(name), '.pmu-name min-width:0')
+  const nameCell = cssRule(css, '.pmu-nameCell')
+  ok(/min-width:0/u.test(nameCell), '.pmu-nameCell min-width:0')
+  // 每个网格项显式指定列（空列由模板轨道占位，后续列不位移）
+  const columns = [
+    ['.pmu-check', '1', '复选框'],
+    ['.pmu-nameCell', '2', '插件名'],
+    ['.pmu-kindBadge', '3', '更新来源'],
+    ['.pmu-versions', '4', '版本变动'],
+    ['.pmu-spacer', '5', '弹性空隙'],
+    ['.pmu-disabledBadge', '6', '已禁用'],
+    ['.pmu-statusBadge', '7', '主状态'],
+    ['.pmu-rowActions', '8', '操作'],
+  ]
+  for (const [selector, column, label] of columns) {
+    ok(new RegExp(`grid-column:${column}(;|$)`, 'u').test(cssRule(css, selector)), `${label}列显式 grid-column:${column}`)
+  }
+  ok(/justify-self:start/u.test(cssRule(css, '.pmu-statusBadge')), '主状态列在固定轨道内左对齐')
+  // 不换行
+  ok(/white-space:nowrap/u.test(cssRule(css, '.pmu-versions')), '.pmu-versions 不换行')
+  ok(/white-space:nowrap/u.test(cssRule(css, '.pmu-disabledBadge')), '.pmu-disabledBadge 不换行')
+  ok(/white-space:nowrap/u.test(cssRule(css, '.pmu-statusBadge')), '.pmu-statusBadge 不换行')
+  ok(/white-space:nowrap/u.test(css), '状态徽标基类 pmp-badge 自带 nowrap')
+  // 操作列右对齐 + 内部换行
+  const actions = cssRule(css, '.pmu-rowActions')
+  ok(/justify-content:flex-end/u.test(actions), '.pmu-rowActions 右对齐')
+  ok(/flex-wrap:wrap/u.test(actions), '.pmu-rowActions 内部可换行（版本豁免入口不挤动其他列）')
+  ok(/justify-self:end/u.test(actions), '.pmu-rowActions 在网格列内贴右')
+  // 窄屏：收紧轨道
+  ok(/@media\s*\(max-width:720px\)\s*\{\.pmu-rowMain\{grid-template-columns/u.test(css), '窄屏 720px 有收紧的 grid 模板')
+  ok(/@media\s*\(max-width:560px\)\s*\{\.pmu-rowMain\{grid-template-columns/u.test(css), '窄屏 560px 有更紧凑的 grid 模板')
+  ok(/@media\s*\(max-width:420px\)\s*\{\.pmu-rowMain\{grid-template-columns/u.test(css), '超窄屏 420px 有最紧凑的 grid 模板')
+  ok(/\.pmu-spacer\{display:none\}/u.test(css), '窄屏隐藏弹性空隙')
+})
+
+test('跨行对齐：所有行共用同一 grid 模板且单元格无内联覆盖', async () => {
+  bootClient()
+  fakeFetch = defaultFetch()
+  const context = await renderUpdates()
+  const rows = collect(context.result).filter(el => el.type === 'div' && el.props.className === 'pmu-row')
+  ok(rows.length >= 7, `渲染出多行（${rows.length}）`)
+  const templates = []
+  for (const row of rows) {
+    const main = collect(row).find(el => el.type === 'div' && String(el.props?.className ?? '') === 'pmu-rowMain')
+    ok(main !== undefined, '每行都有 pmu-rowMain')
+    eq(main?.props?.style, undefined, '行主区没有内联 style（模板统一来自 CSS 类）')
+    templates.push(String(main?.props?.className))
+    // 7 个网格项（已禁用列为空时不渲染占位节点）或 8 个（含已禁用徽标）
+    const cells = (main?.rendered ?? []).filter(el => el !== null && typeof el === 'object')
+    ok(cells.length === 7 || cells.length === 8, `每行 7–8 个网格项（实际 ${cells.length}；空列由共享模板占位）`)
+  }
+  eq([...new Set(templates)].length, 1, '所有行的 grid 容器类完全一致（共享列宽）')
+  context.unmount()
+})
+
+test('主状态唯一：每行一个状态徽标，不再有重复的预发布/已废弃标签', async () => {
+  bootClient()
+  fakeFetch = defaultFetch()
+  const context = await renderUpdates()
+  const rows = collect(context.result).filter(el => el.type === 'div' && el.props.className === 'pmu-row')
+  ok(rows.length > 0, '有可见行')
+  for (const row of rows) {
+    const badges = collect(row).filter(el => String(el.props?.className ?? '').includes('pmu-statusBadge'))
+    ok(badges.length === 1, `每行恰好 1 个主状态徽标（${nodeText(row).slice(0, 24)}…）`)
+  }
+  // 预发布/已废弃只由主状态表达，不再附加重复徽标
+  const prereleaseBadges = collect(context.result).filter(el => String(el.props?.className ?? '').includes('pmp-badge') && nodeText(el).trim() === '预发布')
+  eq(prereleaseBadges.length, 1, '预发布只出现一次（主状态）')
+  const states = rows.map(row => collect(row).find(el => String(el.props?.className ?? '').includes('pmu-statusBadge'))?.props['data-state'])
+  ok(states.includes('updatable') && states.includes('incompatible') && states.includes('prerelease') && states.includes('failed') && states.includes('uncheckable') && states.includes('current'), `主状态覆盖各类型（实际 ${states.join(',')}）`)
+  context.unmount()
+})
+
+test('无法检查徽标：原生 title 来自候选 reason（中文）', async () => {
+  bootClient()
+  const candidates = [
+    { name: 'git-miss', current: '1.0.0', latest: null, kind: 'git', state: 'uncheckable', enabled: true, incompatible: null, prerelease: false, deprecated: null, reason: 'index-miss' },
+    { name: 'git-unpinned', current: '1.0.0', latest: null, kind: 'git', state: 'uncheckable', enabled: true, incompatible: null, prerelease: false, deprecated: null, reason: 'unpinned-git-spec' },
+    { name: 'git-other', current: '1.0.0', latest: null, kind: 'git', state: 'uncheckable', enabled: true, incompatible: null, prerelease: false, deprecated: null, reason: 'weird-reason' },
+    { name: 'git-none', current: '1.0.0', latest: null, kind: 'git', state: 'uncheckable', enabled: true, incompatible: null, prerelease: false, deprecated: null },
+  ]
+  fakeFetch = defaultFetch({ candidates })
+  const context = await renderUpdates()
+  eq(statusBadge(context, 'git-miss')?.props.title, '本地索引中找不到该 Git 包可用的提交记录', 'index-miss → 本地索引找不到提交')
+  eq(statusBadge(context, 'git-unpinned')?.props.title, 'Git 包未固定 commit，无法检查更新', 'unpinned-git-spec → 未固定 commit')
+  eq(statusBadge(context, 'git-other')?.props.title, '暂时无法检查更新（原因未知）', '其它 reason → 兜底文案')
+  eq(statusBadge(context, 'git-none')?.props.title, '暂时无法检查更新（原因未知）', '缺失 reason → 兜底文案')
+  eq(nodeText(statusBadge(context, 'git-miss')).trim(), '无法检查', '主状态文案是「无法检查」')
+  context.unmount()
+})
+
+test('无法检查徽标：英文 title 同样映射', async () => {
+  const { component } = bootClient()
+  const en = component.inspectable().dict.en
+  const enT = (key, params) => {
+    let out = en[key] ?? key
+    for (const name of Object.keys(params ?? {})) out = out.split(`{${name}}`).join(String(params[name]))
+    return out
+  }
+  const candidates = [
+    { name: 'en-miss', current: '1.0.0', latest: null, kind: 'git', state: 'uncheckable', enabled: true, incompatible: null, prerelease: false, deprecated: null, reason: 'index-miss' },
+    { name: 'en-unpinned', current: '1.0.0', latest: null, kind: 'git', state: 'uncheckable', enabled: true, incompatible: null, prerelease: false, deprecated: null, reason: 'unpinned-git-spec' },
+  ]
+  fakeFetch = defaultFetch({ candidates })
+  const context = await renderUpdates({ t: enT })
+  eq(statusBadge(context, 'en-miss')?.props.title, 'No usable commit for this Git bundle was found in the local index', '英文 index-miss 文案')
+  eq(statusBadge(context, 'en-unpinned')?.props.title, 'This Git bundle is not pinned to a commit, so updates cannot be checked', '英文 unpinned-git-spec 文案')
+  eq(nodeText(kindBadge(context, 'en-miss')).trim(), 'git', '英文下 git 徽标仍是 git')
+  context.unmount()
+})
+
+test('主状态优先级与「已禁用」分离（纯函数）', () => {
+  const { component } = bootClient()
+  const { statusOf, uncheckableReasonText } = component.inspectable()
+  const row = (over) => Object.assign({ state: 'updatable', incompatible: false, prerelease: false, deprecated: false, enabled: true }, over)
+  eq(statusOf(row({ state: 'failed' }), false), 'failed', '检查失败最高')
+  eq(statusOf(row({ state: 'failed', incompatible: true }), false), 'failed', '检查失败 > 不兼容')
+  eq(statusOf(row({ state: 'uncheckable', incompatible: true }), false), 'uncheckable', '无法检查 > 不兼容')
+  eq(statusOf(row({ incompatible: true }), false), 'incompatible', '不兼容 > 可更新')
+  eq(statusOf(row({ incompatible: true }), true), 'exempted', '已豁免 > 不兼容')
+  eq(statusOf(row({ state: 'incompatible' }), true), 'exempted', 'state=incompatible 且已豁免 → 已豁免')
+  eq(statusOf(row({ state: 'skipped', deprecated: true }), false), 'deprecated', 'skipped+deprecated → 已废弃')
+  eq(statusOf(row({ state: 'skipped', prerelease: true }), false), 'prerelease', 'skipped+prerelease → 预发布')
+  eq(statusOf(row({ state: 'skipped' }), false), 'skipped', 'skipped → 跳过')
+  eq(statusOf(row({ state: 'current' }), false), 'current', 'current → 无更新')
+  eq(statusOf(row({ state: 'unknown' }), false), 'unknown', 'unknown → 未检查')
+  eq(statusOf(row({ state: 'disabled', enabled: false }), false), 'updatable', 'state=disabled 时主状态仍是可更新（已禁用另列）')
+  eq(statusOf(row({ enabled: false }), false), 'updatable', '已禁用不并入主状态')
+  ok(!['disabled'].includes(statusOf(row({ state: 'disabled', enabled: false }), false)), '主状态永不返回 disabled')
+  eq(uncheckableReasonText('index-miss', (key) => key), 'updatesUncheckableReasonIndexMiss', 'index-miss 映射专用文案键')
+  eq(uncheckableReasonText('unpinned-git-spec', (key) => key), 'updatesUncheckableReasonUnpinned', 'unpinned-git-spec 映射专用文案键')
+  eq(uncheckableReasonText('', (key) => key), 'updatesUncheckableReasonOther', '缺省映射兜底文案键')
 })
 
 test('过滤与搜索', async () => {
@@ -803,7 +1066,7 @@ test('单项更新：确认框 + POST /updates/apply', async () => {
   ok(text.includes('失败时会尝试装回当前版本'), '确认框写明失败会回滚')
   ok(text.includes('demo-plugin-a'), '确认框写清包名')
   ok(text.includes('1.2.0') && text.includes('1.4.2'), '确认框写清当前 → 目标版本')
-  ok(text.includes('registry'), '确认框写明安装来源')
+  ok(text.includes('demo-plugin-a@1.2.0'), '确认框写明安装来源（registry 包显示其安装 spec）')
   await clickModalButton(context, '开始更新')
   const call = fakeFetch.calls.find(item => item.url.endsWith('/updates/apply'))
   ok(call !== undefined, '确认后 POST /updates/apply')
@@ -897,7 +1160,7 @@ test('两个开关：默认关 + POST /settings 持久化', async () => {
 /** Host `/updates/state` 的队列项真实形状（lib/updates.js createUpdateQueue 的初始值）。 */
 function hostItem(over = {}) {
   return Object.assign({
-    name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'registry',
+    name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'npm',
     requestId: 'upd-1', stage: 'queued', success: false, failed: false, restartRequired: false,
     cancelled: false, error: null, restore: null, startedAt: 0, endedAt: null,
   }, over)
@@ -1102,7 +1365,7 @@ test('回滚失败文案：restore.application=failed + error.diagnostic', async
 test('unknown 行徽标显示「未检查」而不是「没有可用更新」', async () => {
   bootClient()
   const candidates = [{
-    name: 'unchecked-one', current: '1.0.0', latest: null, kind: 'registry', state: 'unknown',
+    name: 'unchecked-one', current: '1.0.0', latest: null, kind: 'npm', state: 'unknown',
     enabled: true, incompatible: null, prerelease: false, deprecated: null,
   }]
   fakeFetch = defaultFetch({ candidates })
@@ -1115,32 +1378,45 @@ test('unknown 行徽标显示「未检查」而不是「没有可用更新」', 
   context.unmount()
 })
 
-test('不兼容行：展开不满足项 + 豁免流程', async () => {
+test('不兼容行：版本豁免入口 + 完整流程（无展开原因/详情）', async () => {
   bootClient()
   fakeFetch = defaultFetch()
-  const context = await renderUpdates()
-  const rows = () => collect(context.result).filter(el => el.type === 'div' && el.props.className === 'pmu-row')
-  const row = rows().find(item => nodeText(item).includes('demo-plugin-c'))
+  const opened = []
+  const context = await renderUpdates({ openPackage: (name) => { opened.push(name) } })
+  const row = rowFor(context, 'demo-plugin-c')
   ok(nodeText(row).includes('不兼容'), '真实 incompatible 对象 → 行显示「不兼容」徽标')
   const updateButton = collect(row).find(el => el.type === 'button' && nodeText(el).includes('更新'))
   eq(updateButton.props.disabled, true, '不兼容行的 [更新] 先禁用')
   const rowCheckbox = collect(row).find(el => el.type === 'input' && el.props.type === 'checkbox')
   eq(rowCheckbox.props.disabled, true, '不兼容行的复选框不可勾选')
-  const expand = collect(row).find(el => el.type === 'button' && nodeText(el).includes('展开不兼容原因'))
-  ok(expand !== undefined, '不兼容行可展开')
-  expand.props.onClick()
+  // 行内解释区整体移除：没有详情、没有展开/收起、没有 requirements 等解释行。
+  ok(!collect(row).some(el => el.type === 'button' && nodeText(el).trim() === '详情'), '不兼容行没有「详情」按钮')
+  ok(!collect(row).some(el => el.type === 'button' && /展开|收起/u.test(nodeText(el))), '没有「展开不兼容原因 / 收起」按钮')
+  ok(!allText(context).includes('不满足项') && !allText(context).includes('>=0.4.0'), '不渲染行内解释区（requirements / 范围不出现）')
+  // 版本豁免入口仍在。
+  const entry = collect(row).find(el => el.type === 'button' && nodeText(el).trim() === '版本豁免')
+  ok(entry !== undefined, '不兼容且可豁免的行有「版本豁免」入口')
+  ok(findInput(context, '我知道风险：可能崩溃、数据丢失') === undefined, '未点击入口时风险勾选不展开')
+  entry.props.onClick()
   await settle(context)
-  const expandedText = allText(context)
-  ok(expandedText.includes('与当前 DSH 不兼容'), '展开显示不兼容标题')
-  ok(expandedText.includes('>=0.4.0 <0.5.0'), '展开显示不满足的 engines.dsh 条件（扁平 requirements 的真实范围）')
-  ok(expandedText.includes('运行中的 DSH：0.3.9'), '展开显示当前 DSH 版本')
+  const openedRow = rowFor(context, 'demo-plugin-c')
+  ok(!/展开|收起/u.test(nodeText(openedRow)), '点击后也不出现展开/收起按钮')
   const ack = findInput(context, '我知道风险：可能崩溃、数据丢失')
-  ok(ack !== undefined, '提供风险勾选框')
+  ok(ack !== undefined, '点击「版本豁免」展开风险勾选')
   const exemptButton = findButton(context, '豁免此版本并更新')
   eq(exemptButton.props.disabled, true, '未勾选风险时豁免按钮禁用')
   fireChange(ack, {})
   await settle(context)
   eq(findButton(context, '豁免此版本并更新').props.disabled, false, '勾选后豁免按钮可用')
+  // 收起再打开：风险勾选重置（避免误触）
+  collect(rowFor(context, 'demo-plugin-c')).find(el => el.type === 'button' && nodeText(el).trim() === '版本豁免').props.onClick()
+  await settle(context)
+  ok(findInput(context, '我知道风险：可能崩溃、数据丢失') === undefined, '再次点击「版本豁免」收起风险勾选')
+  collect(rowFor(context, 'demo-plugin-c')).find(el => el.type === 'button' && nodeText(el).trim() === '版本豁免').props.onClick()
+  await settle(context)
+  eq(findButton(context, '豁免此版本并更新').props.disabled, true, '重新打开后风险勾选已重置')
+  fireChange(findInput(context, '我知道风险：可能崩溃、数据丢失'), {})
+  await settle(context)
   await clickButton(context, '豁免此版本并更新')
   ok(allText(context).includes('再次确认：豁免风险版本'), '弹出二次确认')
   await clickModalButton(context, '豁免并更新')
@@ -1232,10 +1508,10 @@ test('F1：真实形状行不被全选/更新全部勾选，apply 不含它', as
   context.unmount()
 })
 
-test('真实契约：deprecated 是字符串原因（不是布尔）', async () => {
+test('真实契约：deprecated 是字符串原因（只靠徽标表达，无行内解释区）', async () => {
   bootClient()
   const candidates = [{
-    name: 'dep-old', current: '1.0.0', latest: '1.1.0', kind: 'registry', state: 'available',
+    name: 'dep-old', current: '1.0.0', latest: '1.1.0', kind: 'npm', state: 'available',
     enabled: true, incompatible: null, prerelease: false, deprecated: 'renamed to dep-new',
   }]
   fakeFetch = defaultFetch({ candidates })
@@ -1244,11 +1520,8 @@ test('真实契约：deprecated 是字符串原因（不是布尔）', async () 
   ok(text.includes('dep-old'), '渲染出该候选')
   ok(text.includes('已废弃'), 'deprecated 字符串 → 已废弃徽标')
   const row = rowFor(context, 'dep-old')
-  const expand = collect(row).find(el => el.type === 'button' && nodeText(el).includes('展开不兼容原因'))
-  ok(expand !== undefined, '可展开查看原因')
-  expand.props.onClick()
-  await settle(context)
-  ok(allText(context).includes('renamed to dep-new'), '展开显示废弃原因')
+  ok(!collect(row).some(el => el.type === 'button' && /展开|收起/u.test(nodeText(el))), '没有展开/收起按钮')
+  ok(!text.includes('renamed to dep-new'), '不再渲染行内解释区（废弃原因不显示）')
   context.unmount()
 })
 

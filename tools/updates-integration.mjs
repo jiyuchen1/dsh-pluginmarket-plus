@@ -9,7 +9,7 @@
  *  1. 候选过滤矩阵：official / link: / file: / npm: 别名 / 未固定 commit 的 git /
  *     带插件管理组件 一律不出现；enabled:false 只在 updatesIncludeDisabled=true 出现；
  *     prerelease+deprecated 只在 updatesIncludePrerelease=true 出现（默认 skipped）。
- *  2. 检查两种来源：registry → listVersions(name)；git → 缓存索引里的 source.commit；
+ *  2. 检查两种来源：npm（pluginManager update:registry）→ listVersions(name)；git → 缓存索引里的 source.commit；
  *     索引缺失 → uncheckable 且不抛错。
  *  3. apply 顺序执行 + 失败继续；每项结果含 success/failed/restartRequired/restore；
  *     cancel 停队列 + 取消当前 requestId；stage/logs 来自 plugin-manager/* 事件。
@@ -220,7 +220,7 @@ class FakeRequest {
 }
 
 /**
- * 造一个 bundle 条目（默认：已装、启用、registry 可更新）。
+ * 造一个 bundle 条目（默认：已装、启用、pluginManager update:registry 可更新）。
  * @param {Record<string, unknown>} patch - 覆盖字段。
  * @returns {Record<string, unknown>} BundleInfo 形状的对象。
  */
@@ -571,6 +571,16 @@ section('候选过滤矩阵（方案 §3/§4）')
   ok(!names.includes('disabled-one'), 'enabled:false 默认不出现', names)
   ok(response.body.config?.includeDisabled === false && response.body.config?.includePrerelease === false, '响应里的两个开关默认都是 false', response.body.config)
   ok(names.length === 2, `候选恰好 2 项（实际 ${names.length}）`, names)
+  // 对外 kind 契约：只有 npm / git，绝不出现旧值 'registry'。
+  eq(response.body.candidates.find(entry => entry.name === 'keep-registry')?.kind, 'npm', 'GET /updates：registry 来源对外 kind=npm')
+  eq(response.body.candidates.find(entry => entry.name === 'keep-git')?.kind, 'git', 'GET /updates：git 来源对外 kind=git')
+  ok(response.body.candidates.every(entry => entry.kind === 'npm' || entry.kind === 'git'), '候选 kind 只有 npm / git', response.body.candidates.map(entry => entry.kind))
+  ok(!response.text.includes('"kind":"registry"'), 'GET /updates 响应里没有 "kind":"registry"', response.text.slice(0, 400))
+  // 无法检查的 Git 候选把 reason 透传给界面（本地没有索引 → index-miss）。
+  const gitCandidate = response.body.candidates.find(entry => entry.name === 'keep-git')
+  eq(gitCandidate?.state, 'uncheckable', '没有本地索引时 Git 候选 state=uncheckable')
+  eq(gitCandidate?.reason, 'index-miss', '没有本地索引时 Git 候选 reason=index-miss')
+  ok(Object.prototype.hasOwnProperty.call(gitCandidate ?? {}, 'error'), '候选始终输出 error 字段', Object.keys(gitCandidate ?? {}))
 
   // 分类原因也要对得上：official / 未固定 git / 插件管理组件。
   const { classifyBundle } = await import('../lib/updates.js')
@@ -584,7 +594,7 @@ section('候选过滤矩阵（方案 §3/§4）')
   eq(classifyBundle(byName.get('plugin-managerish-row')).reason, 'plugin-management', 'rows 里的插件管理模块 → reason=plugin-management')
   eq(classifyBundle(byName.get('not-updatable-alias')).reason, 'not-own-name-registry-spec', '别名却标了 registry → reason=not-own-name-registry-spec')
   eq(classifyBundle(byName.get('no-update-field')).reason, 'not-updatable', '没有 update 字段 → reason=not-updatable')
-  eq(classifyBundle(byName.get('keep-registry')).kind, 'registry', 'registry 包被归类为 registry')
+  eq(classifyBundle(byName.get('keep-registry')).kind, 'npm', 'pluginManager 的 update:registry 被归类为对外 kind:npm')
   eq(classifyBundle(byName.get('keep-git')).kind, 'git', '固定 commit 的 git 包被归类为 git')
   app.dispose()
   rmSync(app.profileDir, { recursive: true, force: true })
@@ -662,7 +672,7 @@ section('两个开关：包含已禁用 / 包含预发布与已废弃')
 // ---------------------------------------------------------------------------
 // 检查：registry / git
 // ---------------------------------------------------------------------------
-section('检查：registry 走 listVersions，git 走缓存索引')
+section('检查：npm（registry 来源）走 listVersions，git 走缓存索引')
 {
   const bundles = [bundle({ name: 'reg-check', source: 'reg-check@1.0.0', update: 'registry' }), bundle({ name: 'git-check', version: '1.0.0', source: GIT_HTTPS_OLD, update: 'git' })]
   const manager = makePluginManager(bundles, {
@@ -678,9 +688,15 @@ section('检查：registry 走 listVersions，git 走缓存索引')
   eq(manager.calls.listVersions, ['reg-check'], 'registry 包调用 listVersions(name)（git 包不调用）')
   const gitFirst = first.body.candidates.find(entry => entry.name === 'git-check')
   eq(gitFirst?.state, 'uncheckable', '索引缺失时 git 候选 state=uncheckable')
+  eq(gitFirst?.reason, 'index-miss', '索引缺失时 git 候选 reason=index-miss（透传给界面）')
+  eq(first.body.checked.find(entry => entry.name === 'git-check')?.reason, 'index-miss', 'check 的 checked[] 也带 reason=index-miss')
   const regFirst = first.body.candidates.find(entry => entry.name === 'reg-check')
   eq(regFirst?.latest, '1.3.0', 'registry 候选取 listVersions 里的最新版本')
   eq(regFirst?.state, 'available', 'registry 候选 state=available')
+  eq(regFirst?.kind, 'npm', 'check 候选：registry 来源对外 kind=npm')
+  eq(first.body.checked.find(entry => entry.name === 'reg-check')?.kind, 'npm', 'check checked[]：registry 来源对外 kind=npm')
+  eq(first.body.checked.find(entry => entry.name === 'git-check')?.kind, 'git', 'check checked[]：git 来源对外 kind=git')
+  ok(!first.text.includes('"kind":"registry"'), 'POST /updates/check 响应里没有 "kind":"registry"', first.text.slice(0, 400))
 
   // 写入索引：git 包从缓存索引解析最新 commit。
   const url = 'https://example.test/index.json'
@@ -765,6 +781,8 @@ section('apply：顺序执行与失败继续')
       ok(Object.prototype.hasOwnProperty.call(item, field), `第 ${index + 1} 项含契约字段 ${field}`, Object.keys(item))
     }
   }
+  eq(items.map(item => item.kind), ['npm', 'npm', 'npm'], 'GET /updates/state：items[].kind 全为 npm')
+  ok(!state.text.includes('"kind":"registry"'), 'GET /updates/state 响应里没有 "kind":"registry"', state.text.slice(0, 400))
 
   // 有队列在跑时再 apply 应该 409。
   const managerSlow = makePluginManager(bundles, { delayMs: 250 })

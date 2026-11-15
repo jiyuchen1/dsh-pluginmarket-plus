@@ -143,7 +143,7 @@ function bundle(overrides) {
     ...overrides,
   }
 }
-eq(classifyBundle(bundle({ update: 'registry' }))?.kind, 'registry', '自有包的 registry spec 可更新')
+eq(classifyBundle(bundle({ update: 'registry' }))?.kind, 'npm', 'pluginManager 的 update:registry 映射成 kind:npm')
 eq(classifyBundle(bundle({ official: true, update: 'registry' }))?.reason, 'official', '官方 bundle 不显示')
 eq(classifyBundle(bundle({ installed: false, update: 'registry' }))?.reason, 'not-installed', '未安装的不显示')
 eq(classifyBundle(bundle({ update: undefined }))?.reason, 'not-updatable', 'update 字段缺失（link:/file:/别名/未固定 Git）不显示')
@@ -179,20 +179,26 @@ eq(gitCandidate?.kind, 'git', 'Git 候选带 kind=git')
 eq(gitCandidate?.origin?.repository, 'o/g', 'Git 候选带仓库目录')
 eq(gitCandidate?.spec, `git+https://github.com/o/g.git#${COMMIT_OLD}`, 'Git 候选带 spec')
 eq(collectCandidates({ bundles, indexInfo: { hasIndex: false } }).find(candidate => candidate.name === 'git-pkg')?.state, 'uncheckable', '索引缺失时 Git 候选标记不可检查')
+const uncheckableNoIndex = collectCandidates({ bundles }).find(candidate => candidate.name === 'git-pkg')
+eq(uncheckableNoIndex?.kind, 'git', '不可检查的 Git 候选仍是 kind=git')
+eq(uncheckableNoIndex?.reason, 'index-miss', '索引缺失时 Git 候选带 reason=index-miss')
+ok(Object.hasOwn(uncheckableNoIndex ?? {}, 'error'), '不可检查的 Git 候选带 error 字段（供 UI 显示）')
+eq(uncheckableNoIndex?.error, null, '没有具体错误时 error 为 null')
 eq(collectCandidates({ bundles }).find(candidate => candidate.name === 'enabled-registry')?.state, 'unknown', '未检查前 state=unknown')
+eq(collectCandidates({ bundles }).find(candidate => candidate.name === 'enabled-registry')?.kind, 'npm', '对外候选的 npm kind 是 npm')
 
-const cachedCurrent = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'registry', state: 'available', latest: '1.0.0' } }
+const cachedCurrent = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'npm', state: 'available', latest: '1.0.0' } }
 eq(collectCandidates({ bundles, cached: cachedCurrent }).map(candidate => candidate.name), ['git-pkg'], '没有更高版本的候选被剔除')
-const cachedNewer = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'registry', state: 'available', latest: '1.2.0' } }
+const cachedNewer = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'npm', state: 'available', latest: '1.2.0' } }
 eq(collectCandidates({ bundles, cached: cachedNewer }).find(candidate => candidate.name === 'enabled-registry')?.latest, '1.2.0', '带回上一次检查的目标版本')
-const cachedPre = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'registry', state: 'available', latest: '2.0.0-rc.1', prerelease: true } }
+const cachedPre = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'npm', state: 'available', latest: '2.0.0-rc.1', prerelease: true } }
 eq(collectCandidates({ bundles, cached: cachedPre }).find(candidate => candidate.name === 'enabled-registry')?.state, 'skipped', '预发布目标在开关关闭时降级为 skipped')
 eq(collectCandidates({ bundles, cached: cachedPre, includePrerelease: true }).find(candidate => candidate.name === 'enabled-registry')?.state, 'available', '开关打开后预发布目标可更新')
 
 // 检查缓存的终态优先：current 不再出现；error / uncheckable 原样保留并带原因。
-const cachedCurrentState = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'registry', state: 'current', latest: null } }
+const cachedCurrentState = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'npm', state: 'current', latest: null } }
 eq(collectCandidates({ bundles, cached: cachedCurrentState }).map(candidate => candidate.name), ['git-pkg'], '检查结果 current 的包不再出现')
-const cachedError = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'registry', state: 'error', latest: null, error: 'registry unreachable' } }
+const cachedError = { 'enabled-registry': { name: 'enabled-registry', current: '1.0.0', kind: 'npm', state: 'error', latest: null, error: 'registry unreachable' } }
 const errorCandidate = collectCandidates({ bundles, cached: cachedError }).find(candidate => candidate.name === 'enabled-registry')
 eq(errorCandidate?.state, 'error', '检查失败的包保持 error（不回落 unknown）')
 eq(errorCandidate?.error, 'registry unreachable', 'error 候选带上失败原因')
@@ -227,7 +233,7 @@ function listing(versions) {
   }
 }
 
-const registryCandidate = { name: 'demo', current: '1.0.0', kind: 'registry' }
+const registryCandidate = { name: 'demo', current: '1.0.0', kind: 'npm' }
 const registryChecked = await checkCandidate(registryCandidate, {
   listVersions: async () => listing([
     { version: '1.2.0', tags: ['latest'], prerelease: false, bundle: true },
@@ -351,9 +357,9 @@ const started$ = []
 let stageMidRun = null
 const queue = createUpdateQueue({
   items: [
-    { name: 'a', current: '1.0.0', latest: '1.2.0', kind: 'registry' },
-    { name: 'b', current: '1.0.0', latest: '9.9.9', kind: 'registry' },
-    { name: 'c', current: '1.0.0', latest: '1.3.0', kind: 'registry' },
+    { name: 'a', current: '1.0.0', latest: '1.2.0', kind: 'npm' },
+    { name: 'b', current: '1.0.0', latest: '9.9.9', kind: 'npm' },
+    { name: 'c', current: '1.0.0', latest: '1.3.0', kind: 'npm' },
   ],
   onError: message => started$.push(`error:${message}`),
   runItem: async (item) => {
@@ -379,8 +385,8 @@ ok(started$.some(entry => entry.startsWith('error:')), '失败会回调 onError'
 const cancelled$ = []
 const queue2 = createUpdateQueue({
   items: [
-    { name: 'a', current: '1.0.0', latest: '1.2.0', kind: 'registry' },
-    { name: 'b', current: '1.0.0', latest: '1.2.0', kind: 'registry' },
+    { name: 'a', current: '1.0.0', latest: '1.2.0', kind: 'npm' },
+    { name: 'b', current: '1.0.0', latest: '1.2.0', kind: 'npm' },
   ],
   runItem: async (item) => {
     cancelled$.push(item.name)
@@ -397,7 +403,7 @@ eq(queue2.isStopped(), true, '取消状态可查询')
 
 // 取消落在失败项上时，那一项算取消而不是失败。
 const queue3 = createUpdateQueue({
-  items: [{ name: 'a', current: '1.0.0', latest: '9.9.9', kind: 'registry' }],
+  items: [{ name: 'a', current: '1.0.0', latest: '9.9.9', kind: 'npm' }],
   runItem: async () => {
     queue3.stop()
     return failed$
@@ -410,8 +416,8 @@ eq(run3.summary, { total: 1, success: 0, failed: 0, cancelled: 1, restartRequire
 const restartOutcome = { from: '1.0.0', to: '1.2.0', step: 'install', result: { changed: true, application: 'restart-required', stage: 'install', target: 'a@1.2.0', restartReason: 'no-hmr' } }
 const queue4 = createUpdateQueue({
   items: [
-    { name: 'a', current: '1.0.0', latest: '1.2.0', kind: 'registry' },
-    { name: 'b', current: '1.0.0', latest: '1.3.0', kind: 'registry' },
+    { name: 'a', current: '1.0.0', latest: '1.2.0', kind: 'npm' },
+    { name: 'b', current: '1.0.0', latest: '1.3.0', kind: 'npm' },
   ],
   runItem: async (item) => item.name === 'a' ? restartOutcome : applied$,
 })
@@ -591,6 +597,12 @@ for (const field of ['current', 'enabled', 'incompatible', 'kind', 'latest', 'na
   ok(fields.includes(field), `候选字段含 ${field}`, fields)
 }
 eq(updates.body.candidates[1].state, 'uncheckable', '没有本地索引时 Git 候选标记不可检查')
+eq(updates.body.candidates[0].kind, 'npm', 'GET /updates 里 npm 来源的候选 kind=npm')
+eq(updates.body.candidates[1].kind, 'git', 'GET /updates 里 Git 候选 kind=git')
+ok(updates.body.candidates.every(candidate => candidate.kind === 'npm' || candidate.kind === 'git'), 'GET /updates 的 kind 只有 npm/git')
+ok(!JSON.stringify(updates.body.candidates).includes('"kind":"registry"'), 'GET /updates 不出现 kind:registry')
+eq(updates.body.candidates[1].reason, 'index-miss', '无索引的 Git 候选带 reason=index-miss')
+ok(Object.hasOwn(updates.body.candidates[1], 'error'), '无索引的 Git 候选带 error 字段')
 
 // 写一份索引正文，验证索引读入 + Git 检查
 const indexUrl = 'https://example.test/index.json'
@@ -627,9 +639,15 @@ eq(afterIndex.body.candidates[1].state, 'unknown', '没检查前 Git 候选仍�
 const checked = await app.call('/api/pluginmarket-plus/updates/check', { method: 'POST', body: {} })
 eq(checked.status, 200, 'POST /updates/check 返回 200')
 eq(manager.calls.listVersions, ['demo-a'], 'registry 包走 listVersions()')
+eq(checked.body.checked.find(entry => entry.name === 'demo-a')?.kind, 'npm', 'check 结果的 npm 候选 kind=npm')
 const checkedB = checked.body.checked.find(entry => entry.name === 'demo-b')
+eq(checkedB.kind, 'git', 'check 结果的 Git 候选 kind=git')
 eq(checkedB.state, 'available', 'Git 包检查成功')
 eq(checkedB.spec, `git+https://github.com/o/b.git#${COMMIT_NEW}`, 'Git 包给出固定 commit 的 spec')
+ok(checked.body.candidates.every(candidate => candidate.kind === 'npm' || candidate.kind === 'git'), 'check 返回的 candidates kind 只有 npm/git')
+ok(!JSON.stringify(checked.body.candidates).includes('"kind":"registry"'), 'check 返回的 candidates 不出现 kind:registry')
+ok(checked.body.checked.every(entry => entry.kind === 'npm' || entry.kind === 'git'), 'check 返回的 checked kind 只有 npm/git')
+ok(!JSON.stringify(checked.body.checked).includes('"kind":"registry"'), 'check 返回的 checked 不出现 kind:registry')
 ok(typeof checked.body.checkedAt === 'number', '带检查时间')
 const gitAfterCheck = checked.body.candidates.find(candidate => candidate.name === 'demo-b')
 eq(gitAfterCheck.latest, '2.0.0', '候选接着带回检查结果')
@@ -655,7 +673,13 @@ ok(state.body.items.every(item => typeof item.stage === 'string'), '每项都有
 await new Promise(resolve => setTimeout(resolve, 50))
 const doneState = await app.call('/api/pluginmarket-plus/updates/state')
 eq(doneState.body.summary, { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 }, '队列跑完的汇总是成功 2')
+eq(doneState.body.items.map(item => item.kind).sort(), ['git', 'npm'], 'GET /updates/state 的 items kind 只有 npm/git')
+ok(!JSON.stringify(doneState.body.items).includes('"kind":"registry"'), 'GET /updates/state 不出现 kind:registry')
+eq(doneState.body.items.find(item => item.name === 'demo-a')?.kind, 'npm', 'npm 项正常更新且 kind=npm')
+eq(doneState.body.items.find(item => item.name === 'demo-b')?.kind, 'git', 'Git 项 kind=git')
 eq(manager.calls.updateBundle.length, 2, '两项都调了 updateBundle')
+eq(manager.calls.updateBundle[0].name, 'demo-a', 'npm 项第一个执行')
+eq(Object.hasOwn(manager.calls.updateBundle[0].options, 'spec'), false, 'npm 项的 updateBundle 不带 spec')
 eq(manager.calls.updateBundle[1].name, 'demo-b', '顺序执行：demo-b 第二个')
 const gitCall = manager.calls.updateBundle[1]
 eq(gitCall.version, '2.0.0', 'Git 包用索引里的版本')

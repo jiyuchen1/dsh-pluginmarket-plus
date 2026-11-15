@@ -99,9 +99,6 @@ window.__ModuleLoader__.load({
         updatesBulkUpdate: '一键更新',
         updatesCancel: '取消',
         updatesRowUpdate: '更新',
-        updatesRowDetails: '详情',
-        updatesRowExpand: '展开不兼容原因',
-        updatesRowCollapse: '收起',
         updatesStateUpdatable: '可更新',
         updatesStateIncompatible: '不兼容',
         updatesStatePrerelease: '预发布',
@@ -112,14 +109,14 @@ window.__ModuleLoader__.load({
         updatesStateSkipped: '跳过',
         updatesStateCurrent: '无更新',
         updatesStateUncheckable: '无法检查',
+        updatesUncheckableReasonIndexMiss: '本地索引中找不到该 Git 包可用的提交记录',
+        updatesUncheckableReasonUnpinned: 'Git 包未固定 commit，无法检查更新',
+        updatesUncheckableReasonOther: '暂时无法检查更新（原因未知）',
         updatesStateUnknown: '未检查',
-        updatesCurrentHint: '已是最新版本，没有可用更新。',
-        updatesUncheckableHint: 'Git 包在插件市场索引里找不到目标 commit，暂时无法更新。',
-        updatesSkippedHint: '目标版本是预发布/已废弃：默认不勾选；需要时可用行内 [更新] 单独安装。',
         updatesSetsLocalOnly: '当前部署无法写回配置：开关只对本次运行生效。',
         updatesNeedCheck: '还没有检查过，请先点「检查更新」。',
         updatesRunningElsewhere: '另一个更新正在进行，请稍后再试。',
-        updatesKindRegistry: 'registry',
+        updatesKindNpm: 'npm',
         updatesKindGit: 'git',
         updatesEmpty: '没有可更新的插件。点「检查更新」只看已安装且能自动更新的包（官方自带、link:/file:/别名、未固定 commit 的 git 都不显示）。',
         updatesEmptyFilter: '当前筛选下没有条目。',
@@ -130,14 +127,7 @@ window.__ModuleLoader__.load({
         updatesCheckDone: '检查完成：可更新 {n} 项',
         updatesSettingsFailed: '保存设置失败：{error}',
         updatesUnknownVersion: '—',
-        updatesPrereleaseTarget: '目标是预发布版本',
-        updatesDeprecatedTarget: '目标是已废弃版本',
-        updatesDisabledHint: '该插件当前已禁用；更新不会自动启用它。',
-        updatesIncompatibleTitle: '与当前 DSH 不兼容',
-        updatesRequirements: '不满足项：',
-        updatesRuntimeVersion: '运行中的 DSH：{version}',
-        updatesRequirementsEmpty: '未提供具体不满足项。',
-        updatesExemptedHint: '已豁免：{pkg} 在 DSH {runtime} 上运行。',
+        updatesExemptEntry: '版本豁免',
         updatesExemptFlow: '豁免此版本并更新',
         updatesExemptAck: '我知道风险：可能崩溃、数据丢失',
         updatesExemptIntro: '豁免只对本机生效，且精确到「包@版本 × DSH 版本」，插件或 DSH 升级后失效。',
@@ -261,9 +251,6 @@ window.__ModuleLoader__.load({
         updatesBulkUpdate: 'Update selected',
         updatesCancel: 'Cancel',
         updatesRowUpdate: 'Update',
-        updatesRowDetails: 'Details',
-        updatesRowExpand: 'Show why it is incompatible',
-        updatesRowCollapse: 'Collapse',
         updatesStateUpdatable: 'Updatable',
         updatesStateIncompatible: 'Incompatible',
         updatesStatePrerelease: 'Prerelease',
@@ -274,14 +261,14 @@ window.__ModuleLoader__.load({
         updatesStateSkipped: 'Skipped',
         updatesStateCurrent: 'No update',
         updatesStateUncheckable: 'Cannot check',
+        updatesUncheckableReasonIndexMiss: 'No usable commit for this Git bundle was found in the local index',
+        updatesUncheckableReasonUnpinned: 'This Git bundle is not pinned to a commit, so updates cannot be checked',
+        updatesUncheckableReasonOther: 'Cannot check for updates right now (reason unknown)',
         updatesStateUnknown: 'Not checked',
-        updatesCurrentHint: 'Already the newest version; nothing to update.',
-        updatesUncheckableHint: 'The plugin market index has no target commit for this Git bundle, so it cannot update yet.',
-        updatesSkippedHint: 'The target is prerelease/deprecated: never auto-selected; use the row [更新] button to install it deliberately.',
         updatesSetsLocalOnly: 'This deployment cannot persist configuration: the switches last for this run only.',
         updatesNeedCheck: 'Not checked yet — run "Check for updates" first.',
         updatesRunningElsewhere: 'Another update is already running; try again shortly.',
-        updatesKindRegistry: 'registry',
+        updatesKindNpm: 'npm',
         updatesKindGit: 'git',
         updatesEmpty: 'Nothing to update. "Check for updates" only looks at installed bundles that can update automatically (official bundles, link:/file:/aliases, and git specs without a pinned commit are never listed).',
         updatesEmptyFilter: 'No entry matches this filter.',
@@ -292,14 +279,7 @@ window.__ModuleLoader__.load({
         updatesCheckDone: 'Check finished: {n} updatable',
         updatesSettingsFailed: 'Could not save settings: {error}',
         updatesUnknownVersion: '—',
-        updatesPrereleaseTarget: 'Target is a prerelease',
-        updatesDeprecatedTarget: 'Target is deprecated',
-        updatesDisabledHint: 'This bundle is disabled; updating it does not enable it.',
-        updatesIncompatibleTitle: 'Incompatible with the running DSH',
-        updatesRequirements: 'Unsatisfied:',
-        updatesRuntimeVersion: 'Running DSH: {version}',
-        updatesRequirementsEmpty: 'No requirement detail was provided.',
-        updatesExemptedHint: 'Exempted: {pkg} is allowed to run on DSH {runtime}.',
+        updatesExemptEntry: 'Version exemption',
         updatesExemptFlow: 'Exempt this version and update',
         updatesExemptAck: 'I accept the risk: crashes and data loss are possible',
         updatesExemptIntro: 'An exemption is local and exact — one package version on one DSH version; it does not survive upgrading either side.',
@@ -423,14 +403,27 @@ window.__ModuleLoader__.load({
       '.pmu-row{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1)}',
       '.pmu-row[data-tone="bad"]{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, transparent)}',
       '.pmu-row[data-busy="true"]{border-color:var(--dsw-alias-border-selected)}',
-      '.pmu-rowMain{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}',
-      '.pmu-check{width:14px;height:14px;flex:none;accent-color:var(--dsw-alias-state-business-primary);cursor:pointer}',
+      // 行主区：共享列宽的 CSS Grid（所有行共用同一模板 → 来源/版本/状态/操作列垂直对齐）。
+      // 列顺序：复选框 | 插件名(吃剩余空间) | 更新来源 | 版本变动 | 弹性空隙 | 已禁用 | 主状态 | 操作
+      '.pmu-rowMain{display:grid;grid-template-columns:auto minmax(0,1fr) 56px 148px minmax(8px,0.4fr) 56px 92px minmax(112px,auto);column-gap:10px;row-gap:6px;align-items:center;min-width:0}',
+      '.pmu-check{grid-column:1;width:14px;height:14px;accent-color:var(--dsw-alias-state-business-primary);cursor:pointer}',
       '.pmu-check:disabled{opacity:.45;cursor:default}',
-      '.pmu-name{min-width:0;flex:1 1 200px;font-size:13px;line-height:20px;font-weight:600;overflow-wrap:anywhere}',
-      '.pmu-versions{font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap}',
+      '.pmu-nameCell{grid-column:2;min-width:0;max-width:100%;overflow:hidden}',
+      '.pmu-name{display:block;max-width:100%;min-width:0;font-size:13px;line-height:20px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.pmu-nameLink{display:block;max-width:100%;min-width:0;appearance:none;font:inherit;font-size:13px;line-height:20px;font-weight:600;text-align:left;padding:0;border:0;background:transparent;color:var(--dsw-alias-label-primary);cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.pmu-nameLink:hover{text-decoration:underline}',
+      '.pmu-nameLink:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:1px;border-radius:var(--dsw-radius-xs)}',
+      '.pmu-kindBadge{grid-column:3;justify-self:start}',
+      '.pmu-versions{grid-column:4;justify-self:start;font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;color:var(--dsw-alias-label-secondary);white-space:nowrap}',
       '.pmu-arrow{color:var(--dsw-alias-label-tertiary);padding:0 4px}',
-      '.pmu-rowActions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}',
-      '.pmu-expand{font:inherit;font-size:11px;line-height:16px;padding:2px 6px;border:0;background:transparent;color:var(--dsw-alias-link);cursor:pointer;text-decoration:underline}',
+      '.pmu-spacer{grid-column:5;min-width:0}',
+      '.pmu-disabledBadge{grid-column:6;justify-self:start;white-space:nowrap}',
+      '.pmu-statusBadge{grid-column:7;justify-self:start;min-width:0;white-space:nowrap}',
+      '.pmu-rowActions{grid-column:8;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:6px;min-width:0;max-width:100%;justify-self:end}',
+      // 窄屏收紧固定轨道并隐藏弹性空隙，避免整行横向滚动/重叠。
+      '@media (max-width:720px){.pmu-rowMain{grid-template-columns:auto minmax(0,1fr) 48px 120px minmax(6px,0.2fr) 48px 84px minmax(96px,auto);column-gap:6px}}',
+      '@media (max-width:560px){.pmu-rowMain{grid-template-columns:auto minmax(0,1fr) 44px 104px 0 44px 76px minmax(84px,auto);column-gap:4px}.pmu-spacer{display:none}}',
+      '@media (max-width:420px){.pmu-rowMain{grid-template-columns:auto minmax(0,1fr) 40px 84px 0 40px 64px minmax(64px,auto);column-gap:3px}}',
       '.pmu-detail{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px}',
       '.pmu-log{max-height:180px;overflow:auto;margin:0;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;white-space:pre-wrap;overflow-wrap:anywhere}',
       '.pmu-selectAll{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}',
@@ -811,7 +804,6 @@ window.__ModuleLoader__.load({
       unknown: 'updatesStateUnknown',
       deprecated: 'updatesStateDeprecated',
       prerelease: 'updatesStatePrerelease',
-      disabled: 'updatesStateDisabled',
       updatable: 'updatesStateUpdatable',
       exempted: 'updatesStateExempted',
     }
@@ -827,7 +819,6 @@ window.__ModuleLoader__.load({
       current: 'idle',
       unknown: 'idle',
       deprecated: 'warn',
-      disabled: 'idle',
       prerelease: 'warn',
     }
 
@@ -863,6 +854,8 @@ window.__ModuleLoader__.load({
         readProgress,
         progressTerminal,
         restoreText,
+        statusOf,
+        uncheckableReasonText,
       }
     }
 
@@ -1081,7 +1074,9 @@ window.__ModuleLoader__.load({
         || text(incompatibility?.version)
       const current = text(info.current) || text(info.currentVersion) || text(info.version) || text(info.from)
       const deprecatedReason = text(info.deprecated)
-      const kind = text(info.kind) === 'git' ? 'git' : text(info.kind) === 'registry' ? 'registry' : ''
+      // 来源内部统一用 'npm'：Host 新契约给 'npm'，旧数据可能仍是 'registry'，都归一为 'npm'。
+      const rawKind = text(info.kind)
+      const kind = rawKind === 'git' ? 'git' : (rawKind === 'npm' || rawKind === 'registry' ? 'npm' : '')
       return {
         key: cellKey(name, latest),
         name,
@@ -1101,6 +1096,7 @@ window.__ModuleLoader__.load({
         prerelease: info.prerelease === true || isPrereleaseVersion(latest),
         deprecated: info.deprecated === true || deprecatedReason !== '',
         deprecatedReason,
+        reason: text(info.reason),
         checkError: text(info.checkError) || text(info.error),
         restore: null,
         restartRequired: false,
@@ -1357,44 +1353,76 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 一行的状态徽标组。
+     * 来源徽标（npm / git），位于插件名之后、版本变动之前。
      * @param {object} props - 组件属性。
-     * @returns {object} React 元素。
+     * @returns {object|null} React 元素。
      */
-    function RowBadges({ row, exempted, t }) {
-      const nodes = []
-      if (text(row.kind) !== '') {
-        nodes.push(h('span', { className: 'pmp-badge', key: 'kind' }, row.kind === 'git' ? t('updatesKindGit') : t('updatesKindRegistry')))
-      }
-      const state = statusOf(row, exempted)
-      const labelKey = STATUS_LABEL_KEYS[state] ?? STATUS_LABEL_KEYS.unknown
-      nodes.push(h('span', { className: 'pmp-badge', 'data-tone': STATUS_TONES[state] ?? 'idle', key: 'state' },
-        h('span', { className: 'pmp-dot' }), t(labelKey)))
-      if (row.state !== 'prerelease' && row.prerelease === true) nodes.push(h('span', { className: 'pmp-badge', 'data-tone': 'warn', key: 'pre' }, t('updatesStatePrerelease')))
-      if (row.state !== 'deprecated' && row.deprecated === true) nodes.push(h('span', { className: 'pmp-badge', 'data-tone': 'warn', key: 'dep' }, t('updatesStateDeprecated')))
-      if (row.enabled === false) nodes.push(h('span', { className: 'pmp-badge', key: 'dis' }, t('updatesStateDisabled')))
-      if (row.state === 'updatable' && exempted && row.incompatible === true) nodes.push(h('span', { className: 'pmp-badge', 'data-tone': 'ok', key: 'ex' }, t('updatesStateExempted')))
-      return h('span', { className: 'pmu-rowActions' }, ...nodes)
+    function KindBadge({ kind, t }) {
+      if (text(kind) === '') return null
+      return h('span', { className: 'pmp-badge pmu-kindBadge' }, kind === 'git' ? t('updatesKindGit') : t('updatesKindNpm'))
     }
 
     /**
-     * 行的主状态（skipped 按目标标记细化成预发布/已废弃）。
+     * 「已禁用」次左徽标：独立显示在主状态徽标左侧，不合并进主状态。
+     * @param {object} props - 组件属性。
+     * @returns {object|null} React 元素。
+     */
+    function DisabledBadge({ row, t }) {
+      // 只在已禁用时渲染；该列在共享 grid 模板里有固定轨道且后续列都显式 grid-column，
+      // 所以空列也天然占位，其他行不会位移。
+      if (row.enabled !== false) return null
+      return h('span', { className: 'pmp-badge pmu-disabledBadge' }, t('updatesStateDisabled'))
+    }
+
+    /**
+     * 「无法检查」的悬浮原因文案。
+     * @param {string} reason - 候选的 reason（index-miss / unpinned-git-spec / 其它）。
+     * @param {(key: string) => string} t - 翻译函数。
+     * @returns {string} 文案。
+     */
+    function uncheckableReasonText(reason, t) {
+      if (reason === 'index-miss') return t('updatesUncheckableReasonIndexMiss')
+      if (reason === 'unpinned-git-spec') return t('updatesUncheckableReasonUnpinned')
+      return t('updatesUncheckableReasonOther')
+    }
+
+    /**
+     * 主状态徽标：整行只渲染一个，覆盖 无法检查/可更新/不兼容/预发布/已废弃/已豁免/未检查/检查失败/无更新。
+     * @param {object} props - 组件属性。
+     * @returns {object} React 元素。
+     */
+    function StatusBadge({ row, exempted, t }) {
+      const state = statusOf(row, exempted)
+      const labelKey = STATUS_LABEL_KEYS[state] ?? STATUS_LABEL_KEYS.unknown
+      const title = state === 'uncheckable' ? uncheckableReasonText(text(row.reason), t) : undefined
+      return h('span', {
+        className: 'pmp-badge pmu-statusBadge',
+        'data-state': state,
+        'data-tone': STATUS_TONES[state] ?? 'idle',
+        title,
+      }, h('span', { className: 'pmp-dot' }), t(labelKey))
+    }
+
+    /**
+     * 行的主状态（整行只显示一个）。
+     *
+     * 优先级（高→低）：检查失败 > 无法检查 > 不兼容（未豁免）> 已豁免 > 已废弃 > 预发布 > 跳过 >
+     * 无更新 > 未检查 > 可更新。「已禁用」不属于主状态，作为独立徽标显示在主状态左侧。
      * @param {object} row - 行。
      * @param {boolean} exempted - 是否已豁免。
      * @returns {string} 状态键。
      */
     function statusOf(row, exempted) {
-      // 不兼容优先于「可更新/预发布/已废弃/已禁用」，但不掩盖检查失败类状态。
-      const muted = row.state === 'failed' || row.state === 'uncheckable' || row.state === 'current' || row.state === 'unknown'
-      if (!muted && (row.state === 'incompatible' || (row.incompatible === true && exempted !== true))) return 'incompatible'
-      if (row.state === 'incompatible' && exempted === true) return 'exempted'
-      if (row.state === 'skipped') {
-        if (row.deprecated === true) return 'deprecated'
-        if (row.prerelease === true) return 'prerelease'
-        return 'skipped'
-      }
-      if (row.state === 'updatable' && exempted === true) return 'exempted'
-      return row.state
+      const state = text(row.state)
+      if (state === 'failed') return 'failed'
+      if (state === 'uncheckable') return 'uncheckable'
+      if (state === 'incompatible' || row.incompatible === true) return exempted === true ? 'exempted' : 'incompatible'
+      if (state === 'deprecated' || (state === 'skipped' && row.deprecated === true)) return 'deprecated'
+      if (state === 'prerelease' || (state === 'skipped' && row.prerelease === true)) return 'prerelease'
+      if (state === 'skipped') return 'skipped'
+      if (state === 'current') return 'current'
+      if (state === 'unknown') return 'unknown'
+      return 'updatable'
     }
 
     /**
@@ -1450,8 +1478,8 @@ window.__ModuleLoader__.load({
       if (row.directory !== '') parts.push(row.directory)
       if (row.commit !== '') parts.push(row.commit.slice(0, 12))
       if (parts.length > 0) return parts.join(' ')
-      if (row.registry !== '') return `${t('updatesKindRegistry')} ${row.registry}`
-      return row.kind === 'git' ? t('updatesKindGit') : t('updatesKindRegistry')
+      if (row.registry !== '') return `${t('updatesKindNpm')} ${row.registry}`
+      return row.kind === 'git' ? t('updatesKindGit') : t('updatesKindNpm')
     }
 
     /**
@@ -1543,12 +1571,12 @@ window.__ModuleLoader__.load({
       const [filter, setFilter] = React.useState('all')
       const [search, setSearch] = React.useState('')
       const [selected, setSelected] = React.useState({})
-      const [expandedRows, setExpandedRows] = React.useState({})
+      const [exemptPanels, setExemptPanels] = React.useState({})
       const [exempted, setExempted] = React.useState(() => ({}))
       const [notice, setNotice] = React.useState(null)
       const [busy, setBusy] = React.useState('')
       const [confirm, setConfirm] = React.useState(null)
-      const [exemptAck, setExemptAck] = React.useState(false)
+      const [exemptAck, setExemptAck] = React.useState({})
       const [confirmSecond, setConfirmSecond] = React.useState(null)
       const [progress, setProgress] = React.useState(null)
       const [cancelling, setCancelling] = React.useState(false)
@@ -1861,11 +1889,35 @@ window.__ModuleLoader__.load({
 
       const clearSelection = () => { setSelected({}) }
 
-      const toggleExpanded = (key) => {
-        setExpandedRows(previous => {
+      const toggleExemptPanel = (key) => {
+        setExemptPanels(previous => {
           const copy = Object.assign({}, previous)
           if (copy[key] === true) delete copy[key]
           else copy[key] = true
+          return copy
+        })
+        // 收起时清掉该行的风险勾选，重新打开需再次确认风险。
+        setAck(key, false)
+      }
+
+      /**
+       * 某一行的风险勾选状态（按行 key 区分，互不影响）。
+       * @param {string} key - 行键。
+       * @returns {boolean} 是否已勾选。
+       */
+      const ackOf = (key) => exemptAck[key] === true
+
+      /**
+       * 写入某一行的风险勾选。
+       * @param {string} key - 行键。
+       * @param {boolean} next - 是否勾选。
+       * @returns {void}
+       */
+      const setAck = (key, next) => {
+        setExemptAck(previous => {
+          const copy = Object.assign({}, previous)
+          if (next) copy[key] = true
+          else delete copy[key]
           return copy
         })
       }
@@ -1879,14 +1931,18 @@ window.__ModuleLoader__.load({
         })
       }
 
-      const openDetails = (event, name) => {
-        if (event?.preventDefault) event.preventDefault()
+      /**
+       * 打开插件详情（名称即入口）。
+       * @param {string} name - 包名。
+       * @returns {void}
+       */
+      const openDetails = (name) => {
         if (openPackage !== null) openPackage(name)
       }
 
       const progressItems = progress?.items ?? []
       const progressReady = progressItems.length > 0 && progressItems.every(progressTerminal)
-      const openConfirm = (target) => { setConfirm(target); setExemptAck(false); setConfirmSecond(null) }
+      const openConfirm = (target) => { setConfirm(target); setExemptAck({}); setConfirmSecond(null) }
 
       return h('div', { className: 'pmu-root' },
         // 头部：标题 + 检查更新 + 上次检查时间
@@ -1978,11 +2034,11 @@ window.__ModuleLoader__.load({
         h(UpdatesExemptDialogs, {
           pending: confirmSecond,
           t,
-          onCancel: () => { setConfirmSecond(null); setExemptAck(false) },
+          onCancel: () => { setConfirmSecond(null); setExemptAck({}) },
           onConfirm: () => {
             const target = confirmSecond
             setConfirmSecond(null)
-            setExemptAck(false)
+            setExemptAck({})
             if (target !== null) void exemptAndUpdate(target.row, target.incompatibility)
           },
         }),
@@ -1998,10 +2054,9 @@ window.__ModuleLoader__.load({
         const exempt = text(exempted[seen(row.name, row.latest)]) !== ''
         const incompatible = row.incompatible === true && !exempt
         const selectable = selectableRow(row)
-        const expanded = expandedRows[key] === true
         const showExempt = incompatible && canExempt(row)
-        const explainable = incompatible || row.deprecated === true || row.prerelease === true || row.enabled === false
-          || row.state === 'uncheckable' || row.state === 'current' || row.state === 'unknown' || row.state === 'skipped' || row.state === 'failed'
+        const exemptOpen = showExempt && exemptPanels[key] === true
+        const acked = ackOf(key)
         return h('div', {
           className: 'pmu-row', key, 'data-tone': incompatible ? 'bad' : undefined,
           'data-busy': busy === `exempt:${row.name}` ? 'true' : undefined,
@@ -2012,63 +2067,52 @@ window.__ModuleLoader__.load({
             checked: selected[key] === true, disabled: !selectable || busy !== '',
             onChange: () => { toggleSelect(key, selected[key] !== true) },
           }),
-          h('span', { className: 'pmu-name' }, row.name),
+          // 插件名（网格第 2 列，吃剩余空间；过长省略号 + title 显示全名）。
+          openPackage !== null
+            ? h('button', {
+              type: 'button', className: 'pmu-name pmu-nameLink pmu-nameCell', title: row.name,
+              onClick: () => { openDetails(row.name) },
+            }, row.name)
+            : h('span', { className: 'pmu-name pmu-nameCell', title: row.name }, row.name),
+          // 中间固定列：来源 → 版本变动（所有行共享同一轨道，垂直对齐）。
+          h(KindBadge, { kind: row.kind, t }),
           h('span', { className: 'pmu-versions' },
             row.current === '' ? t('updatesUnknownVersion') : row.current,
             h('span', { className: 'pmu-arrow' }, '→'),
             row.latest === '' ? t('updatesUnknownVersion') : row.latest),
-          h(RowBadges, { row, exempted: exempt, t }),
+          // 弹性空隙 + 已禁用列（空也占位）+ 主状态列 + 操作列（右对齐、内部可换行）。
+          h('span', { className: 'pmu-spacer' }),
+          h(DisabledBadge, { row, t }),
+          h(StatusBadge, { row, exempted: exempt, t }),
           h('span', { className: 'pmu-rowActions' },
             h('button', {
               type: 'button', className: 'pmp-btn pmp-btnPrimary',
               disabled: !selectable || incompatible || busy !== '',
               onClick: () => { openConfirm({ rows: [row] }) },
             }, t('updatesRowUpdate')),
+            showExempt && h('button', {
+              type: 'button', className: 'pmp-btn pmp-btnDanger',
+              'aria-expanded': exemptOpen ? 'true' : 'false',
+              disabled: busy !== '',
+              onClick: () => { toggleExemptPanel(key) },
+            }, t('updatesExemptEntry'))) ),
+
+        // 版本豁免：入口展开风险勾选 → 「豁免此版本并更新」 → 二次确认弹窗 → POST /updates/exempt
+        exemptOpen && h('div', { className: 'pmu-detail pmu-exempt' },
+          h('p', { className: 'pmu-hint' }, t('updatesExemptIntro')),
+          h('label', { className: 'pmu-ack' },
+            h('input', {
+              type: 'checkbox', className: 'pmu-check', 'aria-label': t('updatesExemptAck'),
+              checked: acked, disabled: busy !== '',
+              onChange: () => { setAck(key, !acked) },
+            }),
+            t('updatesExemptAck')),
+          h('div', { className: 'pmu-rowActions' },
             h('button', {
-              type: 'button', className: 'pmp-btn',
-              onClick: (event) => { openDetails(event, row.name) },
-            }, t('updatesRowDetails')),
-            explainable && h('button', {
-              type: 'button', className: 'pmu-expand',
-              onClick: () => { toggleExpanded(key) },
-            }, expanded ? t('updatesRowCollapse') : t('updatesRowExpand'))) ),
-
-        expanded && h('div', { className: 'pmu-detail' },
-          incompatible && h('div', null,
-            h('p', { className: 'pmu-error' }, t('updatesIncompatibleTitle')),
-            h('p', { className: 'pmu-hint' }, t('updatesRequirements')),
-            (() => {
-              const lines = requirementLines(row.incompatibility)
-              return h('div', { className: 'pmu-log' }, lines.length === 0 ? t('updatesRequirementsEmpty') : lines.join('\n'))
-            })(),
-            text(row.incompatibility?.runtimeVersion) !== '' && h('p', { className: 'pmu-hint' }, t('updatesRuntimeVersion', { version: text(row.incompatibility?.runtimeVersion) }))),
-          row.prerelease === true && h('p', { className: 'pmu-hint' }, t('updatesPrereleaseTarget')),
-          row.deprecated === true && h('p', { className: 'pmu-hint' }, row.deprecatedReason === '' ? t('updatesDeprecatedTarget') : `${t('updatesDeprecatedTarget')}：${row.deprecatedReason}`),
-          row.enabled === false && h('p', { className: 'pmu-hint' }, t('updatesDisabledHint')),
-          row.state === 'uncheckable' && h('p', { className: 'pmu-hint' }, t('updatesUncheckableHint')),
-          row.state === 'current' && h('p', { className: 'pmu-hint' }, t('updatesCurrentHint')),
-          row.state === 'skipped' && settings.includePrerelease !== true && h('p', { className: 'pmu-hint' }, t('updatesSkippedHint')),
-          row.checkError !== '' && h('p', { className: 'pmu-error' }, row.checkError),
-          row.spec !== '' && h('p', { className: 'pmu-hint' }, `${t('updatesConfirmSource')}: ${locationText(row, t)}`),
-
-          // 版本豁免：勾选风险 → 二次确认弹窗 → POST /updates/exempt {acceptRisk:true}
-          showExempt && h('div', { className: 'pmu-detail' },
-            h('p', { className: 'pmu-hint' }, t('updatesExemptIntro')),
-            h('label', { className: 'pmu-ack' },
-              h('input', {
-                type: 'checkbox', className: 'pmu-check', 'aria-label': t('updatesExemptAck'),
-                checked: exemptAck, disabled: busy !== '',
-                onChange: () => { setExemptAck(!exemptAck) },
-              }),
-              t('updatesExemptAck')),
-            h('div', { className: 'pmu-rowActions' },
-              h('button', {
-                type: 'button', className: 'pmp-btn pmp-btnDanger',
-                disabled: exemptAck !== true || busy !== '',
-                onClick: () => { setConfirmSecond({ row, incompatibility: row.incompatibility }) },
-              }, busy === `exempt:${row.name}` ? t('updatesExemptDoing') : t('updatesExemptFlow')))),
-
-          h('p', { className: 'pmu-hint' }, exempt ? t('updatesExemptedHint', { pkg: `${row.name}@${row.latest}`, runtime: text(row.incompatibility?.runtimeVersion) || '—' }) : '')))
+              type: 'button', className: 'pmp-btn pmp-btnDanger',
+              disabled: acked !== true || busy !== '',
+              onClick: () => { setConfirmSecond({ row, incompatibility: row.incompatibility }) },
+            }, busy === `exempt:${row.name}` ? t('updatesExemptDoing') : t('updatesExemptFlow')))))
       }
 
       /** 清掉阶段历史（关闭进度视图时）。 */
