@@ -353,11 +353,29 @@ function rowFor(context, name) {
  * @param {string} label - chip 文本。
  * @returns {Promise<void>} 完成。
  */
-async function clickChip(context, label) {
-  const chip = collect(context.result).find(el => el.type === 'button' && el.props.className === 'pmu-chip' && nodeText(el) === label)
-  if (chip === undefined) throw new Error(`找不到过滤 chip：${label}`)
-  chip.props.onClick()
+function gearButton(context) {
+  return collect(context.result).find(el => el.type === 'button' && String(el.props?.className ?? '').split(/\s+/u).includes('pmu-gearBtn'))
+}
+
+/**
+ * 打开齿轮设置菜单。
+ * @param {object} context - 渲染上下文。
+ * @returns {Promise<void>} 完成。
+ */
+async function openSettings(context) {
+  const gear = gearButton(context)
+  if (gear === undefined) throw new Error('找不到设置齿轮按钮')
+  gear.props.onClick()
   await settle(context)
+}
+
+/**
+ * 取设置菜单里的开关（顺序：显示检查失败的项 / 包含预发布 / 包含已禁用）。
+ * @param {object} context - 渲染上下文。
+ * @returns {object[]} 开关按钮。
+ */
+function menuSwitches(context) {
+  return collect(context.result).filter(el => el.type === 'button' && el.props.role === 'switch')
 }
 
 /**
@@ -586,7 +604,7 @@ function installGlobals() {
  */
 function defaultFetch(options = {}) {
   const calls = []
-  const settingsRef = options.settingsRef ?? { updatesIncludeDisabled: false, updatesIncludePrerelease: false }
+  const settingsRef = options.settingsRef ?? { updatesIncludeDisabled: false, updatesIncludePrerelease: false, updatesShowFailed: false }
   const stateSeq = options.stateSeq ?? null
   const candidates = options.candidates ?? CANDIDATES
   let stateIndex = 0
@@ -601,13 +619,15 @@ function defaultFetch(options = {}) {
         candidates,
         checkedAt: 1_700_000_000_000,
         index: { sources: ['https://example.com/index.json'], packages: candidates.length, error: null },
-        config: Object.assign({}, settingsRef),
+        // 真实 Host：GET /updates 的 config.showFailed，POST/status 回 updatesShowFailed。
+        config: Object.assign({}, settingsRef, { showFailed: settingsRef.updatesShowFailed === true }),
         running: false,
       })
     }
     if (url === '/api/pluginmarket-plus/settings' && method === 'POST') {
       if (body?.updatesIncludeDisabled !== undefined) settingsRef.updatesIncludeDisabled = body.updatesIncludeDisabled
       if (body?.updatesIncludePrerelease !== undefined) settingsRef.updatesIncludePrerelease = body.updatesIncludePrerelease
+      if (body?.updatesShowFailed !== undefined) settingsRef.updatesShowFailed = body.updatesShowFailed
       return json({ ok: true, saved: true, status: { config: Object.assign({}, settingsRef) } })
     }
     if (url === '/api/pluginmarket-plus/updates/check') {
@@ -779,6 +799,25 @@ test('席位注册与词典', async () => {
   ok(registrations.length === 4, `注册了 4 个席位（实际 ${registrations.length}）`)
 })
 
+test('词典：删除过滤相关键，新增设置/显示检查失败键，zh=en', () => {
+  const { component } = bootClient()
+  const dict = component.inspectable().dict
+  const removed = ['updatesFilterMenu', 'updatesFilterSelect', 'updatesFilterAll', 'updatesFilterUpdatable', 'updatesFilterFailed']
+  for (const key of removed) {
+    ok(dict.zh[key] === undefined && dict.en[key] === undefined, `已删除无用键 ${key}`)
+  }
+  eq(dict.zh.updatesSettingsMenu, '设置', '新增 updatesSettingsMenu（zh）')
+  eq(dict.en.updatesSettingsMenu, 'Settings', '新增 updatesSettingsMenu（en）')
+  eq(dict.zh.updatesShowFailed, '显示检查失败的项', '新增 updatesShowFailed（zh）')
+  eq(dict.en.updatesShowFailed, 'Show failed checks', '新增 updatesShowFailed（en）')
+  eq(Object.keys(dict.zh).length, Object.keys(dict.en).length, `zh/en 键数一致（${Object.keys(dict.zh).length}）`)
+  const inspectable = component.inspectable()
+  eq(inspectable.filters, undefined, '不再导出 filters')
+  eq(inspectable.scopeStates.join(','), 'updatable,skipped,incompatible', '导出 scopeStates')
+  eq(inspectable.failedScopeStates.join(','), 'failed,uncheckable,unknown', '导出 failedScopeStates')
+  eq(typeof inspectable.inScope, 'function', '导出 inScope')
+})
+
 test('样式只用 --dsw-alias-* 颜色 token', async () => {
   const { component } = bootClient()
   const info = component.inspectable()
@@ -808,7 +847,181 @@ test('检查更新按钮与统计条', async () => {
   context.unmount()
 })
 
-test('行渲染：复选框 / 版本 / 徽标 / 名称即详情 / openPackage', async () => {
+test('工具条：单行五控件，检查时间在统计条最右', async () => {
+  const { component } = bootClient()
+  // 先构造「从未检查」（checkedAt: null）的桥接，再检查一次拿到时间。
+  const impl = defaultFetch()
+  fakeFetch = withCalls(async (url, init) => {
+    if (url === '/api/pluginmarket-plus/updates') {
+      const response = await impl(url, init)
+      const payload = await response.json()
+      return { ok: true, status: 200, json: async () => Object.assign({}, payload, { checkedAt: null }) }
+    }
+    return impl(url, init)
+  })
+  const context = await renderUpdates()
+  ok(!collect(context.result).some(el => el.type === 'div' && String(el.props?.className ?? '') === 'pmu-head'), '不再有独立头部区域')
+  ok(!collect(context.result).some(el => el.type === 'h3' && nodeText(el).includes('可更新')), '不再有「可更新」标题')
+  ok(!collect(context.result).some(el => el.type === 'select'), '不再有独立过滤下拉')
+  ok(!collect(context.result).some(el => el.type === 'button' && nodeText(el).trim() === '筛选'), '不再有「筛选」文字按钮')
+  const toolbar = collect(context.result).find(el => el.type === 'div' && String(el.props?.className ?? '') === 'pmu-toolbar')
+  ok(toolbar !== undefined, '有工具条')
+  const kinds = (toolbar.rendered ?? []).filter(el => el !== null && typeof el === 'object').map(el => el.type === 'div' ? 'gear' : el.type)
+  eq(kinds.join(','), 'button,input,gear,button,button', `工具条次序：检查更新 / 搜索框 / 齿轮 / 更新全部 / 更新已选（实际 ${kinds.join(',')}）`)
+  const toolbarButtons = collect(toolbar)
+    .filter(el => el.type === 'button' && String(el.props?.className ?? '').includes('pmp-btn') && !String(el.props?.className ?? '').includes('pmu-gearBtn'))
+    .map(el => nodeText(el).trim())
+  eq(JSON.stringify(toolbarButtons), JSON.stringify(['检查更新', '更新全部', '更新已选']), '工具条按钮文案与次序')
+  const gear = gearButton(context)
+  ok(gear !== undefined, '有齿轮按钮')
+  eq(gear.props['aria-label'], '设置', '齿轮 aria-label=设置')
+  eq(gear.props.title, '设置', '齿轮 title=设置')
+  eq(nodeText(gear).trim(), '', '齿轮按钮无文字')
+  // 检查时间在统计条最右
+  const summaryChildren = () => {
+    const summary = collect(context.result).find(el => el.type === 'div' && String(el.props?.className ?? '') === 'pmu-summary')
+    return (summary?.rendered ?? []).filter(el => el !== null && typeof el === 'object')
+  }
+  const kids = summaryChildren()
+  ok(String(kids[kids.length - 1].props?.className ?? '').includes('pmu-summaryTime'), '统计条最后一个元素是检查时间')
+  ok(nodeText(kids[kids.length - 1]).includes('尚未检查'), '未检查时显示「尚未检查」')
+  ok(/margin-left:auto/u.test(cssRule(component.inspectable().css, '.pmu-summaryTime')), '检查时间右对齐（margin-left:auto）')
+  await clickButton(context, '检查更新')
+  const kids2 = summaryChildren()
+  ok(/上次检查\s*\d{1,2}:\d{2}/u.test(nodeText(kids2[kids2.length - 1])), '检查后显示「上次检查 HH:MM」')
+  context.unmount()
+})
+
+test('设置菜单结构：菜单不是全屏遮罩的后代（回归：不能再被定位到视口外）', async () => {
+  const { component } = bootClient()
+  fakeFetch = defaultFetch()
+  const context = await renderUpdates()
+  await openSettings(context)
+  const wrap = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-filterWrap'))
+  const layer = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-menuLayer'))
+  const menu = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-menu'))
+  ok(wrap !== undefined && layer !== undefined && menu !== undefined, 'filterWrap / 遮罩 / 菜单都在')
+  ok(!collect(layer).includes(menu), '菜单不是 pmu-menuLayer 的后代（根因回归断言）')
+  const wrapChildren = (wrap.rendered ?? []).filter(el => el !== null && typeof el === 'object')
+  ok(wrapChildren.includes(layer) && wrapChildren.includes(menu), '遮罩与菜单都是 pmu-filterWrap 的直接子节点（兄弟）')
+  ok(wrapChildren.indexOf(layer) < wrapChildren.indexOf(menu), '遮罩在菜单之前（菜单绘制在其上）')
+  // 定位基准与层级
+  const css = component.inspectable().css
+  ok(/position:relative/u.test(cssRule(css, '.pmu-filterWrap')), 'filterWrap 是定位包含块（position:relative）')
+  const menuRule = cssRule(css, '.pmu-menu')
+  ok(/position:absolute/u.test(menuRule), '菜单用绝对定位（相对 filterWrap）')
+  ok(/top:calc\(100% \+ 6px\)/u.test(menuRule), '菜单贴在按钮下方（top:calc(100% + 6px)）')
+  const menuZ = Number((menuRule.match(/z-index:(\d+)/u) ?? [])[1])
+  const layerZ = Number((cssRule(css, '.pmu-menuLayer').match(/z-index:(\d+)/u) ?? [])[1])
+  ok(Number.isFinite(menuZ) && Number.isFinite(layerZ) && menuZ > layerZ, `菜单 z-index(${menuZ}) 高于遮罩(${layerZ})`)
+  ok(/max-width:min\(320px,92vw\)/u.test(menuRule), '菜单宽度受视口约束（min(320px,92vw)）')
+  ok(/max-height:min\(70vh,360px\)/u.test(menuRule), '菜单高度受视口约束（min(70vh,360px)）')
+  ok(/\.pmu-menu\[data-placement="top"\]\[data-anchored="css"\]/u.test(css), '有向上换向的样式规则（仅纯 CSS 定位时生效）')
+  ok(/position:fixed/u.test(cssRule(css, '.pmu-menuLayer')), '遮罩仍铺满视口')
+  // 菜单内部点击不关闭
+  let stopped = false
+  menu.props.onClick({ stopPropagation: () => { stopped = true } })
+  await settle(context)
+  ok(stopped, '菜单内部点击阻止冒泡')
+  eq(gearButton(context).props['aria-expanded'], 'true', '点菜单内部不关闭菜单')
+  // 点按钮开合：再次点击收起
+  await openSettings(context)
+  eq(gearButton(context).props['aria-expanded'], 'false', '再点齿轮收起菜单（点按钮开合）')
+  ok(!collect(context.result).some(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-menu')), '收起后菜单与遮罩都不在')
+  context.unmount()
+})
+
+test('menuPlacement：贴下方、空间不足换向、水平贴边不出视口', () => {
+  const { component } = bootClient()
+  const { menuPlacement } = component.inspectable()
+  const anchor = { left: 40, right: 100, top: 20, bottom: 48 }
+  eq(JSON.stringify(menuPlacement(anchor, { width: 1200, height: 800 }, { width: 240, height: 108 })),
+    JSON.stringify({ left: 40, top: 54, placement: 'bottom' }), '空间足够：贴按钮下方')
+  const flip = menuPlacement({ left: 40, top: 700, bottom: 728 }, { width: 1200, height: 760 }, { width: 240, height: 108 })
+  eq(flip.placement, 'top', '下方空间不足：向上换向')
+  eq(flip.top, 700 - 6 - 108, '换向后贴按钮上方')
+  eq(menuPlacement({ left: 1100, top: 20, bottom: 48 }, { width: 1200, height: 800 }, { width: 240, height: 108 }).left, 1200 - 240 - 8, '右侧超出：贴右边距')
+  eq(menuPlacement({ left: -50, top: 20, bottom: 48 }, { width: 1200, height: 800 }, { width: 240, height: 108 }).left, 8, '左侧超出：贴左边距')
+  const narrow = menuPlacement({ left: 10, top: 20, bottom: 48 }, { width: 320, height: 800 }, { width: 300, height: 108 })
+  eq(narrow.left, 10, '窄屏：菜单在视口内就不动')
+  ok(narrow.left + 300 <= 320 - 8, `窄屏：右边缘留白（${narrow.left}+300 ≤ 312）`)
+  eq(menuPlacement({ left: 10, top: 20, bottom: 48 }, { width: 320, height: 800 }, { width: 320, height: 108 }).left, 8, '菜单等于视口宽：贴左边距')
+  const unknown = menuPlacement(anchor, { width: 0, height: 0 }, { width: 0, height: 0 })
+  eq(unknown.placement, 'bottom', '拿不到视口尺寸时退化为贴下方')
+  ok(Number.isFinite(unknown.left) && Number.isFinite(unknown.top), '退化时坐标仍是有限数')
+})
+
+test('Host 的 config.showFailed=true：首屏就显示检查失败/无法检查的项', async () => {
+  bootClient()
+  const settingsRef = { updatesIncludeDisabled: false, updatesIncludePrerelease: false, updatesShowFailed: true }
+  fakeFetch = defaultFetch({ settingsRef })
+  const context = await renderUpdates()
+  const text = allText(context)
+  ok(text.includes('demo-plugin-f') && text.includes('检查失败'), '打开状态下来自 GET /updates 的 config.showFailed=true → 显示 failed 行')
+  ok(text.includes('demo-plugin-g') && text.includes('无法检查'), '同时显示 uncheckable 行')
+  eq(menuSwitches(context).length, 0, '默认不展开菜单')
+  await openSettings(context)
+  eq(menuSwitches(context)[0].props['aria-checked'], 'true', '菜单里「显示检查失败的项」呈打开态')
+  context.unmount()
+})
+
+test('空态：全是无更新行 → 「没有可更新的插件。」；只有失败的项 → 提示打开开关', async () => {
+  bootClient()
+  fakeFetch = defaultFetch({ candidates: [{ name: 'only-current', current: '1.0.0', latest: '1.0.0', kind: 'npm', state: 'current', enabled: true, incompatible: null, prerelease: false, deprecated: null }] })
+  let context = await renderUpdates()
+  ok(allText(context).includes('没有可更新的插件。'), '只有无更新行时显示「没有可更新的插件。」')
+  ok(!allText(context).includes('可在设置里打开'), '没有隐藏的失败项时不提示开关')
+  context.unmount()
+  bootClient()
+  fakeFetch = defaultFetch({ candidates: [{ name: 'only-failed', current: '1.0.0', latest: '', kind: 'npm', state: 'error', enabled: true, incompatible: null, prerelease: false, deprecated: null }] })
+  context = await renderUpdates()
+  ok(allText(context).includes('可在设置里打开「显示检查失败的项」'), '只有失败项时提示打开「显示检查失败的项」')
+  ok(!allText(context).includes('only-failed'), '提示态下列表本身为空')
+  context.unmount()
+})
+
+test('齿轮设置菜单：三个开关 + /settings 持久化，不再有过滤下拉', async () => {
+  const { component } = bootClient()
+  const settingsRef = { updatesIncludeDisabled: false, updatesIncludePrerelease: false, updatesShowFailed: false }
+  fakeFetch = defaultFetch({ settingsRef })
+  const context = await renderUpdates()
+  const css = component.inspectable().css
+  ok(!/\.pmu-chip/u.test(css), '样式表里不残留 chip 规则')
+  ok(!/\.pmu-filterSelect/u.test(css), '样式表里不残留过滤下拉样式')
+  ok(!collect(context.result).some(el => el.type === 'select'), '没有过滤下拉')
+  ok(!collect(context.result).some(el => el.type === 'button' && nodeText(el).trim() === '筛选'), '没有「筛选」文字按钮')
+  ok(findInput(context, '搜索包名…') !== undefined, '搜索框保留')
+  eq(menuSwitches(context).length, 0, '默认不展开设置菜单')
+  eq(gearButton(context).props['aria-expanded'], 'false', '齿轮 aria-expanded=false')
+  await openSettings(context)
+  eq(gearButton(context).props['aria-expanded'], 'true', '打开后 aria-expanded=true')
+  const switches = menuSwitches(context)
+  eq(switches.length, 3, '菜单里三个开关')
+  const labels = collect(context.result)
+    .filter(el => el.type === 'button' && String(el.props?.className ?? '').includes('pmu-switchLabel'))
+    .map(el => nodeText(el).trim())
+  eq(JSON.stringify(labels), JSON.stringify(['显示检查失败的项', '包含预发布/已废弃', '包含已禁用的插件']), `三个开关文案与顺序（实际 ${labels.join(' / ')}）`)
+  eq(switches.map(el => el.props['aria-checked']).join(','), 'false,false,false', '默认三个都关')
+  // 打开「显示检查失败的项」→ POST /settings 带 updatesShowFailed
+  switches[0].props.onClick()
+  await settle(context)
+  const call = fakeFetch.calls.filter(item => item.url === '/api/pluginmarket-plus/settings').pop()
+  ok(call !== undefined, '开关变化 POST /settings')
+  eq(call.body.updatesShowFailed, true, '持久化 updatesShowFailed=true')
+  eq(call.body.updatesIncludeDisabled, false, '同时带上其他开关当前值')
+  eq(settingsRef.updatesShowFailed, true, '服务端配置已写入')
+  ok(allText(context).includes('demo-plugin-f'), '打开后检查失败行出现')
+  // 统计条保留（全选 + 可更新 N 项 · 已选 M）
+  ok(allText(context).includes('全选'), '全选保留')
+  ok(allText(context).includes('可更新 2 项 · 已选 0'), '统计条保留')
+  eq(findButton(context, '更新全部').props.disabled, false, '有可安装项时「更新全部」可用')
+  await clickButton(context, '更新全部')
+  ok(allText(context).includes('确认更新 2 项'), '「更新全部」仍选全部可安装项')
+  await clickModalButton(context, '取消')
+  context.unmount()
+})
+
+test('行渲染：默认只显示有更新的项 / 版本 / 徽标 / 名称即详情 / openPackage', async () => {
   bootClient()
   fakeFetch = defaultFetch()
   const opened = []
@@ -818,16 +1031,16 @@ test('行渲染：复选框 / 版本 / 徽标 / 名称即详情 / openPackage', 
   ok(text.includes('1.2.0') && text.includes('1.4.2'), '显示 当前 → 目标 版本')
   ok(text.includes('npm') && text.includes('git'), '显示 npm / git 来源徽标')
   ok(!text.includes('registry'), '不再显示旧的 registry 字样')
-  ok(text.includes('可更新') && text.includes('不兼容') && text.includes('预发布') && text.includes('检查失败') && text.includes('无法检查') && text.includes('无更新'), '显示状态徽标（可更新/不兼容/预发布/检查失败/无法检查/无更新）')
-  ok(text.includes('demo-plugin-g') && text.includes('无法检查'), 'uncheckable 的 Git 行显示「无法检查」')
+  ok(text.includes('可更新') && text.includes('不兼容') && text.includes('预发布'), '显示状态徽标（可更新/不兼容/预发布）')
+  ok(!text.includes('demo-plugin-f') && !text.includes('demo-plugin-g') && !text.includes('demo-plugin-h'), '默认隐藏 failed/uncheckable/无更新 行')
   ok(!text.includes('demo-plugin-e'), '「包含已禁用」默认关：已禁用插件不显示')
   const checkboxes = collect(context.result).filter(el => el.type === 'input' && el.props.type === 'checkbox')
-  eq(checkboxes.length, 8, '每行一个复选框（7 行可见 + 全选）')
+  eq(checkboxes.length, 5, '每行一个复选框（4 行可见 + 全选）')
   // 详情按钮已删除，功能移到插件名称上。
   const buttons = collect(context.result).filter(el => el.type === 'button')
   ok(!buttons.some(el => nodeText(el).trim() === '详情'), '行内不再渲染「详情」按钮')
   const nameButtons = buttons.filter(el => String(el.props.className ?? '').includes('pmu-nameLink'))
-  eq(nameButtons.length, 7, '每个可见行的插件名称都是可点击控件')
+  eq(nameButtons.length, 4, '每个可见行的插件名称都是可点击控件')
   const nameButton = nameButtons.find(el => nodeText(el).trim() === 'demo-plugin-a')
   ok(nameButton !== undefined, '插件名称是可点击控件')
   eq(nameButton?.props.type, 'button', '插件名称是 button 语义（可键盘聚焦）')
@@ -835,6 +1048,16 @@ test('行渲染：复选框 / 版本 / 徽标 / 名称即详情 / openPackage', 
   await settle(context)
   eq(opened.length, 1, '点击插件名 → 调用 owner props openPackage(name)')
   eq(opened[0], 'demo-plugin-a', 'openPackage 收到该行的包名')
+  // 打开「显示检查失败的项」后：失败/无法检查行出现
+  await openSettings(context)
+  menuSwitches(context)[0].props.onClick()
+  await settle(context)
+  const text2 = allText(context)
+  ok(text2.includes('demo-plugin-f') && text2.includes('demo-plugin-g'), '打开开关后出现 failed / uncheckable 行')
+  eq(nodeText(statusBadge(context, 'demo-plugin-f')).trim(), '检查失败', 'failed 行显示「检查失败」')
+  eq(nodeText(statusBadge(context, 'demo-plugin-g')).trim(), '无法检查', 'uncheckable 行显示「无法检查」')
+  eq(collect(context.result).filter(el => el.type === 'input' && el.props.type === 'checkbox').length, 7, '打开后 6 行可见 + 全选')
+  ok(!allText(context).includes('demo-plugin-h'), '无更新行仍然不显示（不在基础范围也不在失败范围）')
   context.unmount()
 })
 
@@ -845,18 +1068,16 @@ test('行布局：复选框→名称→来源→版本→空隙→已禁用→�
   const normal = ['checkbox', 'name', 'kind', 'versions', 'spacer', 'status', 'actions']
   eq(JSON.stringify(rowLayout(context, 'demo-plugin-a')), JSON.stringify(normal), 'npm 行顺序：复选框→名称→来源→版本→空隙→(已禁用空列)→主状态→操作')
   eq(JSON.stringify(rowLayout(context, 'demo-plugin-b')), JSON.stringify(normal), 'git 行顺序一致')
-  eq(JSON.stringify(rowLayout(context, 'demo-plugin-f')), JSON.stringify(normal), '检查失败行顺序一致')
-  // 旧 kind:'registry' 归一为 npm
-  eq(nodeText(kindBadge(context, 'demo-plugin-h')).trim(), 'npm', '旧 registry 归一后显示 npm 徽标')
+  eq(JSON.stringify(rowLayout(context, 'demo-plugin-d')), JSON.stringify(normal), '预发布行顺序一致')
   eq(nodeText(kindBadge(context, 'demo-plugin-b')).trim(), 'git', 'git 行显示 git 徽标')
   // 来源徽标在版本变动之前；已禁用列始终占位（不是已禁用时为空）
   const order = rowLayout(context, 'demo-plugin-a')
   ok(order.indexOf('kind') < order.indexOf('versions'), '来源徽标在版本变动之前')
   ok(!order.includes('disabled'), '非禁用行不渲染已禁用徽标（该列由共享模板空占位）')
   ok(order.indexOf('status') === order.indexOf('actions') - 1, '主状态紧邻操作列左侧')
-  // 打开「包含已禁用」后：已禁用徽标出现在该列里
-  const switches = collect(context.result).filter(el => el.type === 'button' && el.props.role === 'switch')
-  switches[1].props.onClick()
+  // 打开「包含已禁用」（在齿轮设置菜单里）后：已禁用徽标出现在该列里
+  await openSettings(context)
+  menuSwitches(context)[2].props.onClick()
   await settle(context)
   const disabledLayout = rowLayout(context, 'demo-plugin-e')
   eq(JSON.stringify(disabledLayout), JSON.stringify(['checkbox', 'name', 'kind', 'versions', 'spacer', 'disabled', 'status', 'actions']), '已禁用行：已禁用徽标插在主状态列左侧')
@@ -928,7 +1149,7 @@ test('跨行对齐：所有行共用同一 grid 模板且单元格无内联覆�
   fakeFetch = defaultFetch()
   const context = await renderUpdates()
   const rows = collect(context.result).filter(el => el.type === 'div' && el.props.className === 'pmu-row')
-  ok(rows.length >= 7, `渲染出多行（${rows.length}）`)
+  ok(rows.length >= 4, `渲染出多行（${rows.length}）`)
   const templates = []
   for (const row of rows) {
     const main = collect(row).find(el => el.type === 'div' && String(el.props?.className ?? '') === 'pmu-rowMain')
@@ -947,6 +1168,10 @@ test('主状态唯一：每行一个状态徽标，不再有重复的预发布/�
   bootClient()
   fakeFetch = defaultFetch()
   const context = await renderUpdates()
+  // 打开「显示检查失败的项」，让失败/无法检查的行走同一套渲染断言。
+  await openSettings(context)
+  menuSwitches(context)[0].props.onClick()
+  await settle(context)
   const rows = collect(context.result).filter(el => el.type === 'div' && el.props.className === 'pmu-row')
   ok(rows.length > 0, '有可见行')
   for (const row of rows) {
@@ -957,7 +1182,7 @@ test('主状态唯一：每行一个状态徽标，不再有重复的预发布/�
   const prereleaseBadges = collect(context.result).filter(el => String(el.props?.className ?? '').includes('pmp-badge') && nodeText(el).trim() === '预发布')
   eq(prereleaseBadges.length, 1, '预发布只出现一次（主状态）')
   const states = rows.map(row => collect(row).find(el => String(el.props?.className ?? '').includes('pmu-statusBadge'))?.props['data-state'])
-  ok(states.includes('updatable') && states.includes('incompatible') && states.includes('prerelease') && states.includes('failed') && states.includes('uncheckable') && states.includes('current'), `主状态覆盖各类型（实际 ${states.join(',')}）`)
+  ok(states.includes('updatable') && states.includes('incompatible') && states.includes('prerelease') && states.includes('failed') && states.includes('uncheckable'), `主状态覆盖各类型（实际 ${states.join(',')}）`)
   context.unmount()
 })
 
@@ -971,6 +1196,9 @@ test('无法检查徽标：原生 title 来自候选 reason（中文）', async 
   ]
   fakeFetch = defaultFetch({ candidates })
   const context = await renderUpdates()
+  await openSettings(context)
+  menuSwitches(context)[0].props.onClick()
+  await settle(context)
   eq(statusBadge(context, 'git-miss')?.props.title, '本地索引中找不到该 Git 包可用的提交记录', 'index-miss → 本地索引找不到提交')
   eq(statusBadge(context, 'git-unpinned')?.props.title, 'Git 包未固定 commit，无法检查更新', 'unpinned-git-spec → 未固定 commit')
   eq(statusBadge(context, 'git-other')?.props.title, '暂时无法检查更新（原因未知）', '其它 reason → 兜底文案')
@@ -993,6 +1221,9 @@ test('无法检查徽标：英文 title 同样映射', async () => {
   ]
   fakeFetch = defaultFetch({ candidates })
   const context = await renderUpdates({ t: enT })
+  await openSettings(context)
+  menuSwitches(context)[0].props.onClick()
+  await settle(context)
   eq(statusBadge(context, 'en-miss')?.props.title, 'No usable commit for this Git bundle was found in the local index', '英文 index-miss 文案')
   eq(statusBadge(context, 'en-unpinned')?.props.title, 'This Git bundle is not pinned to a commit, so updates cannot be checked', '英文 unpinned-git-spec 文案')
   eq(nodeText(kindBadge(context, 'en-miss')).trim(), 'git', '英文下 git 徽标仍是 git')
@@ -1022,22 +1253,38 @@ test('主状态优先级与「已禁用」分离（纯函数）', () => {
   eq(uncheckableReasonText('', (key) => key), 'updatesUncheckableReasonOther', '缺省映射兜底文案键')
 })
 
-test('过滤与搜索', async () => {
-  bootClient()
+test('默认范围（有更新的项）+ 搜索叠加 + 纯函数 inScope', async () => {
+  const { component } = bootClient()
   fakeFetch = defaultFetch()
   const context = await renderUpdates()
-  await clickChip(context, '检查失败')
-  eq(collect(context.result).filter(el => el.type === 'input' && el.props.type === 'checkbox').length, 3, '过滤「检查失败」= error + uncheckable 两行 + 全选')
-  await clickChip(context, '仅可更新')
-  ok(allText(context).includes('demo-plugin-a') && !allText(context).includes('demo-plugin-h'), '过滤「仅可更新」排除「无更新」行')
-  await clickChip(context, '全部')
+  ok(!collect(context.result).some(el => el.type === 'select'), '没有过滤下拉')
+  ok(!collect(context.result).some(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-chip')), '没有 chip 按钮')
+  let text = allText(context)
+  ok(text.includes('demo-plugin-a') && text.includes('demo-plugin-b') && text.includes('demo-plugin-c') && text.includes('demo-plugin-d'), '基础范围显示有更新的项（a/b/c/d）')
+  ok(!text.includes('demo-plugin-f') && !text.includes('demo-plugin-g') && !text.includes('demo-plugin-h'), '默认隐藏 failed / uncheckable / 无更新')
+  ok(!text.includes('demo-plugin-e'), '默认隐藏已禁用')
+  // 空态提示：只剩「检查失败」这类被隐藏的条目时提示打开开关
   const search = findInput(context, '搜索包名…')
   ok(search !== undefined, '有搜索框')
+  fireChange(search, { target: { value: 'demo-plugin-f' } })
+  await settle(context)
+  ok(allText(context).includes('可在设置里打开「显示检查失败的项」'), '搜索命中被隐藏的失败项 → 空态提示打开开关')
+  fireChange(search, { target: { value: 'zzz' } })
+  await settle(context)
+  ok(allText(context).includes('没有匹配当前搜索的条目。'), '搜索无命中显示搜索空态')
   fireChange(search, { target: { value: 'demo-plugin-b' } })
   await settle(context)
-  const text = allText(context)
+  text = allText(context)
   ok(text.includes('demo-plugin-b') && !text.includes('demo-plugin-a'), '搜索按包名过滤')
-  ok(text.includes('当前筛选下没有条目。') === false, '搜索有命中')
+  // 纯函数：范围状态
+  const { inScope, scopeStates, failedScopeStates } = component.inspectable()
+  eq(scopeStates.join(','), 'updatable,skipped,incompatible', '基础范围状态')
+  eq(failedScopeStates.join(','), 'failed,uncheckable,unknown', '需要开关的范围状态')
+  ok(inScope({ state: 'updatable' }, false) && inScope({ state: 'skipped' }, false) && inScope({ state: 'incompatible' }, false), '三种基础状态默认纳入')
+  ok(!inScope({ state: 'failed' }, false) && !inScope({ state: 'uncheckable' }, false) && !inScope({ state: 'unknown' }, false), 'failed/uncheckable/unknown 默认不纳入')
+  ok(inScope({ state: 'failed' }, true) && inScope({ state: 'uncheckable' }, true) && inScope({ state: 'unknown' }, true), '打开开关后纳入')
+  ok(!inScope({ state: 'current' }, true), '无更新行永不纳入')
+  ok(!inScope({ state: 'disabled' }, true), '未知状态不纳入')
   context.unmount()
 })
 
@@ -1100,29 +1347,34 @@ test('git 包：确认框写清 git 位置与 spec', async () => {
   context.unmount()
 })
 
-test('多选 / 全选 / 半选 / 底部批量栏', async () => {
+test('选择与「更新已选」：无底部批量栏，工具条按钮等价批量更新', async () => {
   bootClient()
   fakeFetch = defaultFetch()
   const context = await renderUpdates()
+  ok(!collect(context.result).some(el => String(el.props?.className ?? '').includes('pmu-bulk')), '没有底部批量栏（pmu-bulk）')
+  let text = allText(context)
+  ok(!text.includes('一键更新'), '不再有「一键更新」文案')
+  ok(!/已选 \d+ 项/u.test(text), '统计条用「已选 M」而不是旧的「已选 N 项」批量栏文案')
+  eq(findButton(context, '更新已选').props.disabled, true, '未选中时「更新已选」禁用')
   const rowCheckboxes = () => collect(context.result).filter(el => el.type === 'input' && el.props.type === 'checkbox' && el.props['aria-label'] !== '全选')
   fireChange(rowCheckboxes()[0], {})
   await settle(context)
-  let text = allText(context)
-  ok(text.includes('已选 1 项'), '底部批量栏显示「已选 1 项」')
-  ok(text.includes('一键更新') && text.includes('取消'), '批量栏有 [一键更新] [取消]')
+  text = allText(context)
+  ok(text.includes('已选 1'), '顶部统计条显示「已选 1」')
+  eq(findButton(context, '更新已选').props.disabled, false, '选中 1 项后「更新已选」可用')
   const selectAll = findInput(context, '全选')
   eq(selectAll.props['data-state'], 'indeterminate', '部分选中时全选为半选（indeterminate）')
   fireChange(selectAll, {})
   await settle(context)
   eq(findInput(context, '全选').props['data-state'], 'all', '全选后为全选态')
-  text = allText(context)
-  ok(text.includes('已选 2 项'), '全选只覆盖可安装项（2 项）')
-  await clickButton(context, '一键更新')
-  ok(allText(context).includes('确认更新 2 项'), '「一键更新」对已选项出确认框')
-  await clickModalButton(context, '取消')
-  ok(!allText(context).includes('确认更新 2 项'), '弹窗 [取消] 关闭确认框')
-  await clickButton(context, '取消')
-  eq(findInput(context, '全选').props['data-state'], 'none', '批量栏 [取消] 清空选择')
+  ok(allText(context).includes('已选 2'), '全选只覆盖可安装项（2 项）')
+  await clickButton(context, '更新已选')
+  ok(allText(context).includes('确认更新 2 项'), '「更新已选」对已选项出确认框')
+  await clickModalButton(context, '开始更新')
+  const applyCall = fakeFetch.calls.find(item => item.url.endsWith('/updates/apply'))
+  ok(applyCall !== undefined, '确认后发起 apply')
+  eq(applyCall.body.items.length, 2, 'apply 只带已选的 2 项')
+  eq(applyCall.body.items.some(item => item.name === 'demo-plugin-c'), false, 'apply 不含不可安装项')
   context.unmount()
 })
 
@@ -1132,14 +1384,20 @@ test('两个开关：默认关 + POST /settings 持久化', async () => {
   fakeFetch = defaultFetch({ settingsRef })
   const context = await renderUpdates()
   const switches = () => collect(context.result).filter(el => el.type === 'button' && el.props.role === 'switch')
-  eq(switches().length, 2, '两个开关')
-  eq(switches()[0].props['aria-checked'], 'false', '包含预发布/已废弃默认关')
-  eq(switches()[1].props['aria-checked'], 'false', '包含已禁用默认关')
+  eq(switches().length, 0, '默认不展开设置菜单（工具栏内联开关已移除）')
+  eq(gearButton(context).props['aria-expanded'], 'false', '齿轮 aria-expanded=false')
+  ok(!allText(context).includes('两个开关同时作用'), '不再显示开关说明提示（updatesSettingsHint）')
+  await openSettings(context)
+  eq(gearButton(context).props['aria-expanded'], 'true', '展开后 aria-expanded=true')
+  eq(switches().length, 3, '菜单里三个开关')
+  eq(switches()[0].props['aria-checked'], 'false', '显示检查失败的项默认关')
+  eq(switches()[1].props['aria-checked'], 'false', '包含预发布/已废弃默认关')
+  eq(switches()[2].props['aria-checked'], 'false', '包含已禁用默认关')
   let text = allText(context)
   ok(!text.includes('demo-plugin-e'), '关闭时不显示已禁用的候选')
   ok(text.includes('demo-plugin-d') && text.includes('默认不勾选') === false, 'skipped 的预发布条目仍显示（Host 明确给出）')
   ok(text.includes('可更新 2 项'), '关闭时「更新全部」只有 2 项')
-  switches()[1].props.onClick()
+  switches()[2].props.onClick()
   await settle(context)
   const call = fakeFetch.calls.filter(item => item.url === '/api/pluginmarket-plus/settings').pop()
   ok(call !== undefined, '开关变化 POST /api/pluginmarket-plus/settings')
@@ -1148,12 +1406,28 @@ test('两个开关：默认关 + POST /settings 持久化', async () => {
   text = allText(context)
   ok(text.includes('demo-plugin-e'), '打开后显示已禁用条目')
   ok(text.includes('可更新 3 项'), '打开「包含已禁用」后「更新全部」多出该项')
-  switches()[0].props.onClick()
+  switches()[1].props.onClick()
   await settle(context)
   const call2 = fakeFetch.calls.filter(item => item.url === '/api/pluginmarket-plus/settings').pop()
   eq(call2.body.updatesIncludePrerelease, true, '持久化 updatesIncludePrerelease=true')
   eq(settingsRef.updatesIncludePrerelease, true, '假配置已被写入')
   ok(allText(context).includes('可更新 4 项'), '打开预发布开关后 skipped 的 a/b/d/e 都可自动勾选')
+  // 切开关不会自动收起菜单
+  eq(gearButton(context).props['aria-expanded'], 'true', '切开关后菜单仍展开')
+  // 点击外部（遮罩）关闭
+  const layer = collect(context.result).find(el => String(el.props?.className ?? '').includes('pmu-menuLayer'))
+  ok(layer !== undefined, '菜单带可点击的遮罩层（覆盖点击外部）')
+  layer.props.onClick()
+  await settle(context)
+  eq(collect(context.result).filter(el => el.props.role === 'switch').length, 0, '点击外部关闭设置菜单')
+  eq(gearButton(context).props['aria-expanded'], 'false', '关闭后 aria-expanded=false')
+  // Escape 关闭
+  await openSettings(context)
+  const wrap = collect(context.result).find(el => String(el.props?.className ?? '').includes('pmu-filterWrap'))
+  ok(wrap !== undefined && typeof wrap.props.onKeyDown === 'function', '设置容器处理键盘事件')
+  wrap.props.onKeyDown({ key: 'Escape' })
+  await settle(context)
+  eq(collect(context.result).filter(el => el.props.role === 'switch').length, 0, 'Escape 关闭设置菜单')
   context.unmount()
 })
 
@@ -1175,6 +1449,105 @@ function hostState(over = {}) {
     lastRun: null, checkedAt: 1_700_000_000_000,
   }, over)
 }
+
+test('readSettings：解析嵌套 config，缺席时返回 undefined + known=false', () => {
+  const { component } = bootClient()
+  const { readSettings, mergeSettings } = component.inspectable()
+  // POST /settings 的真实形状：配置在 status.config 里
+  const post = readSettings({ ok: true, saved: true, status: { config: { updatesIncludeDisabled: true, updatesIncludePrerelease: false } } })
+  eq(post.known, true, 'status.config 被识别（known=true）')
+  eq(post.includeDisabled, true, 'status.config.updatesIncludeDisabled → true')
+  eq(post.includePrerelease, false, 'status.config.updatesIncludePrerelease → false')
+  // status.settings / status.updates 两种嵌套别名
+  const viaSettings = readSettings({ ok: true, status: { settings: { updatesIncludePrerelease: true } } })
+  eq(viaSettings.includePrerelease, true, 'status.settings 别名可解析')
+  const viaUpdates = readSettings({ ok: true, status: { updates: { includeDisabled: true } } })
+  eq(viaUpdates.includeDisabled, true, 'status.updates + 短键名可解析')
+  // 「显示检查失败的项」：POST 的 status.config.updatesShowFailed 与 GET 的 config.showFailed
+  const postFailed = readSettings({ ok: true, saved: true, status: { config: { updatesShowFailed: true } } })
+  eq(postFailed.known, true, 'status.config.updatesShowFailed 被识别')
+  eq(postFailed.showFailed, true, 'status.config.updatesShowFailed → true')
+  const getFailed = readSettings({ ok: true, config: { showFailed: true, includePrerelease: false } })
+  eq(getFailed.showFailed, true, 'GET 的 config.showFailed → true')
+  eq(readSettings({ ok: true, config: { includePrerelease: true } }).showFailed, undefined, 'config 没有 showFailed 时返回 undefined')
+  const mergedFailed = mergeSettings({ includeDisabled: false, includePrerelease: false, showFailed: true, settable: true }, { includePrerelease: false, settable: true, known: true })
+  eq(mergedFailed.showFailed, true, 'mergeSettings 保留未被响应覆盖的 showFailed')
+  // GET /updates 的顶层 config 仍然可解析
+  const get = readSettings({ ok: true, config: { includeDisabled: false, includePrerelease: true } })
+  eq(get.known, true, '顶层 config 被识别')
+  eq(get.includeDisabled, false, '顶层 config.includeDisabled → false')
+  eq(get.includePrerelease, true, '顶层 config.includePrerelease → true')
+  // 缺席：必须是 undefined 而不是 false
+  const absent = readSettings({ ok: true })
+  eq(absent.known, false, '没有配置时 known=false')
+  eq(absent.includeDisabled, undefined, '缺席时返回 undefined（而不是 false）')
+  eq(absent.includePrerelease, undefined, '缺席时返回 undefined（而不是 false）')
+  // saved:false → settable=false，但仍能读出开关值
+  const unsaved = readSettings({ ok: true, saved: false, status: { config: { updatesIncludeDisabled: true } } })
+  eq(unsaved.settable, false, 'saved:false → settable=false')
+  eq(unsaved.includeDisabled, true, 'saved:false 仍能读出开关值')
+  // mergeSettings：只并入确实提供的字段
+  const merged = mergeSettings({ includeDisabled: true, includePrerelease: false, settable: true }, { known: false })
+  eq(JSON.stringify(merged), JSON.stringify({ includeDisabled: true, includePrerelease: false, settable: true }), 'known=false 时本地状态完全不变')
+  const merged2 = mergeSettings({ includeDisabled: true, includePrerelease: false, settable: true }, { includePrerelease: true, settable: true, known: true })
+  eq(merged2.includePrerelease, true, '提供字段被并入')
+  eq(merged2.includeDisabled, true, '未提供字段保持原值')
+})
+
+test('筛选开关回归：POST 响应缺配置时两个开关不会被翻成 false', async () => {
+  bootClient()
+  const settingsRef = { updatesIncludeDisabled: false, updatesIncludePrerelease: false }
+  const impl = defaultFetch({ settingsRef })
+  // POST /settings 只回 {ok,saved}（历史 bug 现场）：两个开关必须保持乐观值。
+  // GET /updates 也不带 config，避免被 load() 悄悄「救回来」，从而真正复现回归。
+  fakeFetch = withCalls(async (url, init) => {
+    if (url === '/api/pluginmarket-plus/settings' && init?.method === 'POST') {
+      return { ok: true, status: 200, json: async () => ({ ok: true, saved: true }), text: async () => '{}' }
+    }
+    if (url === '/api/pluginmarket-plus/updates') {
+      const response = await impl(url, init)
+      const payload = await response.json()
+      const copy = Object.assign({}, payload)
+      delete copy.config
+      return { ok: true, status: 200, json: async () => copy }
+    }
+    return impl(url, init)
+  })
+  const context = await renderUpdates()
+  await openSettings(context)
+  const switchAt = (index) => collect(context.result).filter(el => el.type === 'button' && el.props.role === 'switch')[index]
+  eq(switchAt(1).props['aria-checked'], 'false', '初始：包含预发布=false')
+  eq(switchAt(2).props['aria-checked'], 'false', '初始：包含已禁用=false')
+  switchAt(2).props.onClick()
+  await settle(context)
+  eq(switchAt(2).props['aria-checked'], 'true', '打开「包含已禁用」后保持 true（乐观值未被响应清掉）')
+  eq(switchAt(1).props['aria-checked'], 'false', '另一个开关（包含预发布）没有被连带翻成 true 或 false')
+  const call = fakeFetch.calls.filter(item => item.url === '/api/pluginmarket-plus/settings').pop()
+  eq(call.body.updatesIncludeDisabled, true, 'POST 体带上新值')
+  eq(call.body.updatesIncludePrerelease, false, 'POST 体带上另一个开关的当前值')
+  context.unmount()
+})
+
+test('筛选开关回归：POST 响应带 status.config 时两个开关都正确', async () => {
+  bootClient()
+  const settingsRef = { updatesIncludeDisabled: false, updatesIncludePrerelease: false }
+  fakeFetch = defaultFetch({ settingsRef })
+  const context = await renderUpdates()
+  await openSettings(context)
+  const switchAt = (index) => collect(context.result).filter(el => el.type === 'button' && el.props.role === 'switch')[index]
+  // defaultFetch 的 POST /settings 回 {ok,saved,status:{config:{...}}} —— 正是修复前会翻成 false 的形状
+  switchAt(1).props.onClick()
+  await settle(context)
+  eq(switchAt(1).props['aria-checked'], 'true', '打开「包含预发布」后为 true')
+  eq(switchAt(2).props['aria-checked'], 'false', '「包含已禁用」保持 false（未被响应覆盖）')
+  switchAt(2).props.onClick()
+  await settle(context)
+  eq(switchAt(1).props['aria-checked'], 'true', '再开「包含已禁用」时「包含预发布」仍为 true')
+  eq(switchAt(2).props['aria-checked'], 'true', '「包含已禁用」为 true')
+  eq(settingsRef.updatesIncludePrerelease, true, '服务端配置同步了预发布开关')
+  eq(settingsRef.updatesIncludeDisabled, true, '服务端配置同步了已禁用开关')
+  context.unmount()
+})
 
 test('进度视图：真实 state 形状 / 顶层日志 / 取消当前 / 汇总', async () => {
   bootClient()
@@ -1370,6 +1743,9 @@ test('unknown 行徽标显示「未检查」而不是「没有可用更新」', 
   }]
   fakeFetch = defaultFetch({ candidates })
   const context = await renderUpdates()
+  await openSettings(context)
+  menuSwitches(context)[0].props.onClick()
+  await settle(context)
   const text = allText(context)
   ok(text.includes('unchecked-one'), '渲染出 unknown 候选')
   ok(text.includes('未检查'), 'unknown → 「未检查」徽标')

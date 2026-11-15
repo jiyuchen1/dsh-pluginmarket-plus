@@ -570,6 +570,7 @@ section('候选过滤矩阵（方案 §3/§4）')
   }
   ok(!names.includes('disabled-one'), 'enabled:false 默认不出现', names)
   ok(response.body.config?.includeDisabled === false && response.body.config?.includePrerelease === false, '响应里的两个开关默认都是 false', response.body.config)
+  eq(response.body.config?.showFailed, false, 'GET /updates config.showFailed 默认 false')
   ok(names.length === 2, `候选恰好 2 项（实际 ${names.length}）`, names)
   // 对外 kind 契约：只有 npm / git，绝不出现旧值 'registry'。
   eq(response.body.candidates.find(entry => entry.name === 'keep-registry')?.kind, 'npm', 'GET /updates：registry 来源对外 kind=npm')
@@ -1056,7 +1057,9 @@ section('设置持久化：两个开关经 /settings 落盘')
   eq(app.values.updatesIncludeDisabled, true, 'updatesIncludeDisabled 落到配置')
   eq(app.values.updatesIncludePrerelease, true, 'updatesIncludePrerelease 落到配置')
   const listed = await app.call(`${API}/updates`)
-  eq(listed.body.config, { includeDisabled: true, includePrerelease: true }, 'GET /updates 的 config 反映两个开关')
+  eq(listed.body.config?.includeDisabled, true, 'GET /updates config.includeDisabled=true')
+  eq(listed.body.config?.includePrerelease, true, 'GET /updates config.includePrerelease=true')
+  eq(listed.body.config?.showFailed, false, 'GET /updates config.showFailed=false（三键契约）')
   ok(listed.body.candidates.some(entry => entry.name === 'disabled-one'), '打开开关后候选包含已禁用的包')
 
   // settings 不可用时要有内存兜底，别静默失败。

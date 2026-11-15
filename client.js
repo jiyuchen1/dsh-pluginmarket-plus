@@ -86,17 +86,14 @@ window.__ModuleLoader__.load({
         updatesLastChecked: '上次检查 {time}',
         updatesNeverChecked: '尚未检查',
         updatesSummary: '可更新 {updates} 项 · 已选 {selected}',
-        updatesFilterAll: '全部',
-        updatesFilterUpdatable: '仅可更新',
-        updatesFilterFailed: '检查失败',
         updatesSearchPlaceholder: '搜索包名…',
+        updatesSettingsMenu: '设置',
+        updatesShowFailed: '显示检查失败的项',
         updatesIncludePrerelease: '包含预发布/已废弃',
         updatesIncludeDisabled: '包含已禁用的插件',
-        updatesSettingsHint: '两个开关同时作用于列表显示范围与「更新全部」的选取范围，默认都关。',
         updatesUpdateAll: '更新全部',
+        updatesUpdateSelected: '更新已选',
         updatesSelectAll: '全选',
-        updatesSelectedBar: '已选 {n} 项',
-        updatesBulkUpdate: '一键更新',
         updatesCancel: '取消',
         updatesRowUpdate: '更新',
         updatesStateUpdatable: '可更新',
@@ -119,7 +116,9 @@ window.__ModuleLoader__.load({
         updatesKindNpm: 'npm',
         updatesKindGit: 'git',
         updatesEmpty: '没有可更新的插件。点「检查更新」只看已安装且能自动更新的包（官方自带、link:/file:/别名、未固定 commit 的 git 都不显示）。',
-        updatesEmptyFilter: '当前筛选下没有条目。',
+        updatesEmptyFilter: '没有匹配当前搜索的条目。',
+        updatesEmptyNoUpdate: '没有可更新的插件。',
+        updatesEmptyShowFailed: '没有可更新的插件。可在设置里打开「显示检查失败的项」查看检查失败/无法检查的条目。',
         updatesUnknown: '未知',
         updatesLoading: '读取中…',
         updatesLoadFailed: '读取失败：{error}',
@@ -238,17 +237,14 @@ window.__ModuleLoader__.load({
         updatesLastChecked: 'Checked {time}',
         updatesNeverChecked: 'Not checked yet',
         updatesSummary: '{updates} updatable · {selected} selected',
-        updatesFilterAll: 'All',
-        updatesFilterUpdatable: 'Updatable only',
-        updatesFilterFailed: 'Check failed',
         updatesSearchPlaceholder: 'Search package name…',
+        updatesSettingsMenu: 'Settings',
+        updatesShowFailed: 'Show failed checks',
         updatesIncludePrerelease: 'Include prerelease/deprecated',
         updatesIncludeDisabled: 'Include disabled plugins',
-        updatesSettingsHint: 'Both switches scope the list and the "Update all" selection; both default to off.',
         updatesUpdateAll: 'Update all',
+        updatesUpdateSelected: 'Update selected',
         updatesSelectAll: 'Select all',
-        updatesSelectedBar: '{n} selected',
-        updatesBulkUpdate: 'Update selected',
         updatesCancel: 'Cancel',
         updatesRowUpdate: 'Update',
         updatesStateUpdatable: 'Updatable',
@@ -271,7 +267,9 @@ window.__ModuleLoader__.load({
         updatesKindNpm: 'npm',
         updatesKindGit: 'git',
         updatesEmpty: 'Nothing to update. "Check for updates" only looks at installed bundles that can update automatically (official bundles, link:/file:/aliases, and git specs without a pinned commit are never listed).',
-        updatesEmptyFilter: 'No entry matches this filter.',
+        updatesEmptyFilter: 'No entry matches the search.',
+        updatesEmptyNoUpdate: 'Nothing to update.',
+        updatesEmptyShowFailed: 'Nothing to update. Turn on "Show failed checks" in Settings to include failed or uncheckable entries.',
         updatesUnknown: 'unknown',
         updatesLoading: 'Loading…',
         updatesLoadFailed: 'Failed to load: {error}',
@@ -380,16 +378,22 @@ window.__ModuleLoader__.load({
       // ——「可更新」标签页（.pmu-*） ——
       '.pmu-root{display:flex;flex-direction:column;gap:12px;width:100%;min-width:0;color:var(--dsw-alias-label-primary);font:inherit}',
       '.pmu-sr{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}',
-      '.pmu-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}',
       '.pmu-title{margin:0;font-size:16px;font-weight:600;line-height:24px}',
       '.pmu-toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}',
       '.pmu-search{flex:1 1 200px;min-width:140px;height:30px;border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);font:inherit;font-size:12px;padding:0 10px}',
       '.pmu-search:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:0}',
-      '.pmu-chip{font:inherit;font-size:12px;line-height:18px;height:26px;padding:0 10px;border-radius:999px;border:0.5px solid var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer}',
-      '.pmu-chip:hover{background:var(--dsw-alias-interactive-bg-hover)}',
-      '.pmu-chip[data-active="true"]{border-color:var(--dsw-alias-border-selected);background:var(--dsw-alias-bg-multi-select);color:var(--dsw-alias-label-primary)}',
-      '.pmu-switchRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}',
-      '.pmu-switchLabel{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);cursor:pointer}',
+      '.pmu-checkBtn{flex:none}',
+      '.pmu-gearBtn{position:relative;z-index:31;display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;padding:0;flex:none}',
+      '.pmu-gear{display:block}',
+      '.pmu-settingsWrap{flex:none}',
+      '.pmu-switchLabel{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary);cursor:pointer;background:transparent;border:0;padding:0}',
+      '.pmu-filterWrap{position:relative;display:inline-flex}',
+      // 遮罩与菜单是 filterWrap 下的兄弟节点：菜单以 filterWrap（position:relative）为包含块，
+      // 不会再像挂在全屏 fixed 遮罩下那样被定位到视口下方。
+      '.pmu-menuLayer{position:fixed;inset:0;z-index:30}',
+      '.pmu-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:41;display:flex;flex-direction:column;gap:8px;min-width:220px;max-width:min(320px,92vw);max-height:min(70vh,360px);overflow:auto;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-overlay);box-shadow:0 8px 24px var(--dsw-alias-bg-mask-3)}',
+      '.pmu-menu[data-placement="top"][data-anchored="css"]{top:auto;bottom:calc(100% + 6px)}',
+      '.pmu-menuRow{display:flex;align-items:center;gap:8px}',
       '.pmu-notice{margin:0;font-size:12px;line-height:18px;border-radius:var(--dsw-radius-md);padding:8px 10px;overflow-wrap:anywhere}',
       '.pmu-notice[data-tone="ok"]{background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);color:var(--dsw-alias-state-success-primary)}',
       '.pmu-notice[data-tone="error"]{background:color-mix(in srgb, var(--dsw-alias-state-error-primary) 10%, transparent);color:var(--dsw-alias-state-error-primary)}',
@@ -399,6 +403,7 @@ window.__ModuleLoader__.load({
       '.pmu-summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-module-platform)}',
       '.pmu-summaryText{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
       '.pmu-summaryActions{margin-left:auto;display:flex;align-items:center;gap:8px}',
+      '.pmu-summaryTime{margin-left:auto;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}',
       '.pmu-list{display:flex;flex-direction:column;gap:6px}',
       '.pmu-row{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1)}',
       '.pmu-row[data-tone="bad"]{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, transparent)}',
@@ -427,8 +432,6 @@ window.__ModuleLoader__.load({
       '.pmu-detail{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);font-size:12px;line-height:18px}',
       '.pmu-log{max-height:180px;overflow:auto;margin:0;padding:8px 10px;border-radius:var(--dsw-radius-sm);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-secondary);font-family:var(--ds-font-family-code,monospace);font-size:11px;line-height:16px;white-space:pre-wrap;overflow-wrap:anywhere}',
       '.pmu-selectAll{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dsw-alias-label-secondary)}',
-      '.pmu-bulk{position:sticky;bottom:0;display:flex;align-items:center;gap:10px;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-settings-card-fill);box-shadow:0 -1px 0 var(--dsw-alias-border-l2)}',
-      '.pmu-bulkActions{margin-left:auto;display:flex;align-items:center;gap:8px}',
       '.pmu-link{font:inherit;font-size:12px;line-height:18px;padding:0;border:0;background:transparent;color:var(--dsw-alias-link);cursor:pointer;text-decoration:underline}',
       '.pmu-modalLayer{position:fixed;inset:0;z-index:60;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--dsw-alias-bg-mask-1)}',
       '.pmu-modal{display:flex;flex-direction:column;gap:10px;width:100%;max-width:520px;max-height:80vh;overflow:auto;padding:16px 18px;border:0.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-xl);background:var(--dsw-alias-bg-overlay);color:var(--dsw-alias-label-primary);box-shadow:0 8px 24px var(--dsw-alias-bg-mask-3)}',
@@ -523,6 +526,65 @@ window.__ModuleLoader__.load({
         return new Date(timestamp).toLocaleString()
       } catch {
         return new Date(timestamp).toISOString()
+      }
+    }
+
+    /**
+     * 计算「筛选」菜单落点：默认贴按钮下方，下方放不下就向上换向；水平方向贴边不出视口。
+     * @param {{left?: number, right?: number, top?: number, bottom?: number}} anchor - 按钮矩形。
+     * @param {{width?: number, height?: number}} viewport - 视口尺寸。
+     * @param {{width?: number, height?: number}} menu - 菜单尺寸。
+     * @param {number} [gap] - 与按钮的间距。
+     * @returns {{left: number, top: number, placement: 'bottom'|'top'}} 落点。
+     */
+    function menuPlacement(anchor, viewport, menu, gap = 6) {
+      const margin = 8
+      const viewportWidth = num(viewport?.width, 0)
+      const viewportHeight = num(viewport?.height, 0)
+      const menuWidth = num(menu?.width, 0)
+      const menuHeight = num(menu?.height, 0)
+      const maxLeft = Math.max(margin, viewportWidth - menuWidth - margin)
+      const left = Math.max(margin, Math.min(num(anchor?.left, 0), maxLeft))
+      const below = num(anchor?.bottom, 0) + gap
+      const above = num(anchor?.top, 0) - gap - menuHeight
+      const fitsBelow = viewportHeight === 0 || below + menuHeight <= viewportHeight - margin
+      const placement = fitsBelow || above < margin ? 'bottom' : 'top'
+      return { left, top: placement === 'bottom' ? below : above, placement }
+    }
+
+    /**
+     * 量出「筛选」菜单的落点（真实浏览器）；拿不到布局信息时返回 null，退化为纯 CSS 定位。
+     * @param {object} node - filterWrap 元素。
+     * @returns {{left: number, top: number, placement: 'bottom'|'top'}|null} 落点。
+     */
+    function measureMenuPlacement(node) {
+      try {
+        if (typeof node?.getBoundingClientRect !== 'function') return null
+        const rect = node.getBoundingClientRect()
+        if (!(rect.width > 0)) return null
+        const viewport = {
+          width: typeof window === 'undefined' ? 0 : num(window.innerWidth, 0),
+          height: typeof window === 'undefined' ? 0 : num(window.innerHeight, 0),
+        }
+        // 菜单尺寸用声明的上下限估算（min-width 220 / max-width min(320px,92vw)、两行 + 内边距）。
+        const menu = { width: 240, height: 108 }
+        return menuPlacement(rect, viewport, menu)
+      } catch {
+        return null
+      }
+    }
+
+    /**
+     * 只显示时分的本地时间（头部「上次检查 HH:MM」）。
+     * @param {number|null|undefined} timestamp - Unix 毫秒。
+     * @returns {string} 展示文本。
+     */
+    function formatTimeOnly(timestamp) {
+      if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return '—'
+      try {
+        return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      } catch {
+        return new Date(timestamp).toISOString().slice(11, 16)
       }
     }
 
@@ -823,14 +885,8 @@ window.__ModuleLoader__.load({
     }
 
     /** 过滤键 → 文案键。 */
-    const FILTER_LABEL_KEYS = {
-      all: 'updatesFilterAll',
-      updatable: 'updatesFilterUpdatable',
-      failed: 'updatesFilterFailed',
-    }
-
-    /** 过滤顺序。 */
-    const FILTERS = ['all', 'updatable', 'failed']
+    /** 齿轮（设置）图标 path（Feather settings，24×24 视框）。 */
+    const GEAR_PATH = 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z'
 
     /**
      * 自检脚本读取的纯逻辑/常量出口（不参与运行时行为）。
@@ -846,7 +902,9 @@ window.__ModuleLoader__.load({
         stages: PROGRESS_STAGES,
         statusLabels: STATUS_LABEL_KEYS,
         statusTones: STATUS_TONES,
-        filters: FILTERS,
+        scopeStates: SCOPE_STATES,
+        failedScopeStates: FAILED_SCOPE_STATES,
+        inScope,
         dict: I18N,
         css: CSS,
         requirementLines,
@@ -856,6 +914,9 @@ window.__ModuleLoader__.load({
         restoreText,
         statusOf,
         uncheckableReasonText,
+        menuPlacement,
+        readSettings,
+        mergeSettings,
       }
     }
 
@@ -1154,8 +1215,21 @@ window.__ModuleLoader__.load({
      * @param {{includeDisabled: boolean, includePrerelease: boolean}} settings - 当前开关。
      * @returns {object[]} 可安装行。
      */
-    function isFailedState(state) {
-      return state === 'failed' || state === 'uncheckable' || state === 'unknown'
+    /** 基础范围：有更新的项（默认显示）。 */
+    const SCOPE_STATES = ['updatable', 'skipped', 'incompatible']
+    /** 需要「显示检查失败的项」开关才纳入的项。 */
+    const FAILED_SCOPE_STATES = ['failed', 'uncheckable', 'unknown']
+
+    /**
+     * 列表基础范围：默认只显示有更新的项；打开「显示检查失败的项」后追加失败/无法检查/未检查的项。
+     * @param {object} row - 行。
+     * @param {boolean} showFailed - 是否显示检查失败的项。
+     * @returns {boolean} 是否纳入。
+     */
+    function inScope(row, showFailed) {
+      const state = text(row?.state)
+      if (SCOPE_STATES.includes(state)) return true
+      return showFailed === true && FAILED_SCOPE_STATES.includes(state)
     }
 
     /**
@@ -1191,20 +1265,52 @@ window.__ModuleLoader__.load({
      */
     function readSettings(payload) {
       const source = rec(payload)
-      const settings = Object.assign({}, rec(source.config), rec(source.settings), rec(source.updates))
-      const flat = Object.assign({}, settings, source)
+      const status = rec(source.status)
+      // 两个开关可能出现在顶层 config（GET /updates）或一层嵌套的 status.config（POST /settings）。
+      const nested = Object.assign({},
+        rec(status.config), rec(status.settings), rec(status.updates),
+        rec(source.config), rec(source.settings), rec(source.updates))
+      const flat = Object.assign({}, nested, source)
+      /**
+       * 取第一个出现的值；全部缺席时返回 undefined（表示「响应里没说」，调用方不得据此覆盖本地状态）。
+       * @param {...string} keys - 候选键。
+       * @returns {boolean|undefined} 值。
+       */
       const pick = (...keys) => {
         for (const key of keys) {
           if (flat[key] !== undefined) return bool(flat[key])
         }
-        return false
+        return undefined
       }
-      const settable = source.settable === false || settings.settable === false || source.writable === false || source.saved === false ? false : true
+      const includeDisabled = pick('updatesIncludeDisabled', 'includeDisabled')
+      const includePrerelease = pick('updatesIncludePrerelease', 'includePrerelease')
+      // Host：GET /updates 的 config.showFailed；POST /settings 的 status.config.updatesShowFailed。
+      const showFailed = pick('updatesShowFailed', 'showFailed')
+      const settable = source.settable === false || status.settable === false || nested.settable === false
+        || source.writable === false || source.saved === false ? false : true
       return {
-        includeDisabled: pick('updatesIncludeDisabled', 'includeDisabled'),
-        includePrerelease: pick('updatesIncludePrerelease', 'includePrerelease'),
+        includeDisabled,
+        includePrerelease,
+        showFailed,
         settable,
+        // 是否真的从响应里解析到了开关值（false 时调用方保持乐观值，等 GET /updates 校准）。
+        known: includeDisabled !== undefined || includePrerelease !== undefined || showFailed !== undefined,
       }
+    }
+
+    /**
+     * 只把响应里确实提供的开关并入本地状态（避免缺席字段被当成 false 覆盖）。
+     * @param {object} previous - 当前状态。
+     * @param {{includeDisabled?: boolean, includePrerelease?: boolean, settable?: boolean}} incoming - 解析结果。
+     * @returns {object} 新状态。
+     */
+    function mergeSettings(previous, incoming) {
+      const next = Object.assign({}, previous)
+      if (incoming?.includeDisabled !== undefined) next.includeDisabled = incoming.includeDisabled
+      if (incoming?.includePrerelease !== undefined) next.includePrerelease = incoming.includePrerelease
+      if (incoming?.showFailed !== undefined) next.showFailed = incoming.showFailed
+      if (incoming?.settable !== undefined) next.settable = incoming.settable
+      return next
     }
 
     /**
@@ -1342,12 +1448,12 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 输入框 / 开关行（文案可点）。
+     * 「筛选」下拉里的一行开关（文案也可点）。
      * @param {object} props - 组件属性。
      * @returns {object} React 元素。
      */
-    function UpdatesSwitchRow({ checked, disabled, label, onChange }) {
-      return h('div', { className: 'pu-mu-switchRow pmu-switchRow' },
+    function FilterMenuRow({ checked, disabled, label, onChange }) {
+      return h('div', { className: 'pmu-menuRow' },
         h(Switch, { checked, disabled, label, onChange }),
         h('button', { type: 'button', className: 'pmu-switchLabel', disabled: disabled === true, onClick: () => { onChange(!checked) } }, label))
     }
@@ -1417,8 +1523,9 @@ window.__ModuleLoader__.load({
       if (state === 'failed') return 'failed'
       if (state === 'uncheckable') return 'uncheckable'
       if (state === 'incompatible' || row.incompatible === true) return exempted === true ? 'exempted' : 'incompatible'
-      if (state === 'deprecated' || (state === 'skipped' && row.deprecated === true)) return 'deprecated'
-      if (state === 'prerelease' || (state === 'skipped' && row.prerelease === true)) return 'prerelease'
+      // 目标版本自身的属性优先于 Host 的 available/skipped（开关打开时 Host 仍给 available + 标记）。
+      if (state === 'deprecated' || row.deprecated === true) return 'deprecated'
+      if (state === 'prerelease' || row.prerelease === true) return 'prerelease'
       if (state === 'skipped') return 'skipped'
       if (state === 'current') return 'current'
       if (state === 'unknown') return 'unknown'
@@ -1567,8 +1674,7 @@ window.__ModuleLoader__.load({
       const [loaded, setLoaded] = React.useState(false)
       const [loadError, setLoadError] = React.useState('')
       const [checkedAt, setCheckedAt] = React.useState(null)
-      const [settings, setSettings] = React.useState({ includeDisabled: false, includePrerelease: false, settable: true })
-      const [filter, setFilter] = React.useState('all')
+      const [settings, setSettings] = React.useState({ includeDisabled: false, includePrerelease: false, showFailed: false, settable: true })
       const [search, setSearch] = React.useState('')
       const [selected, setSelected] = React.useState({})
       const [exemptPanels, setExemptPanels] = React.useState({})
@@ -1581,10 +1687,13 @@ window.__ModuleLoader__.load({
       const [progress, setProgress] = React.useState(null)
       const [cancelling, setCancelling] = React.useState(false)
       const [openLogs, setOpenLogs] = React.useState({})
+      const [settingsOpen, setSettingsOpen] = React.useState(false)
+      const [menuPos, setMenuPos] = React.useState(null)
       const alive = React.useRef(true)
       const pollRef = React.useRef(null)
       const requestRef = React.useRef('')
       const selectAllRef = React.useRef(null)
+      const settingsRef = React.useRef(null)
       const stagesRef = React.useRef({})
       const startPollingRef = React.useRef(null)
       const tRef = React.useRef(t)
@@ -1622,7 +1731,8 @@ window.__ModuleLoader__.load({
           }
           // Host 契约：candidates[] + config{} + checkedAt + running
           setRows(list(body.candidates ?? body.updates ?? body.items).map(toRow).filter(Boolean))
-          setSettings(readSettings(body))
+          const incomingSettings = readSettings(body)
+          if (incomingSettings.known) setSettings(previous => mergeSettings(previous, incomingSettings))
           setCheckedAt(body.checkedAt === undefined || body.checkedAt === null ? null : num(body.checkedAt, Date.now()))
           setLoadError('')
           setLoaded(true)
@@ -1638,6 +1748,22 @@ window.__ModuleLoader__.load({
           setLoaded(true)
         }
       }, [])
+
+      // 「筛选」下拉打开时响应 Escape（真实浏览器；点击外部由遮罩层处理）。
+      React.useEffect(() => {
+        if (settingsOpen !== true) return undefined
+        /**
+         * @param {object} event - 键盘事件。
+         * @returns {void}
+         */
+        const onKey = (event) => { if (event?.key === 'Escape') setSettingsOpen(false) }
+        try {
+          document.addEventListener('keydown', onKey)
+          return () => { document.removeEventListener('keydown', onKey) }
+        } catch {
+          return undefined
+        }
+      }, [settingsOpen])
 
       const applyCandidates = React.useCallback((body) => {
         const source = rec(body)
@@ -1728,11 +1854,13 @@ window.__ModuleLoader__.load({
         void postJson('/settings', {
           updatesIncludeDisabled: nextSettings.includeDisabled === true,
           updatesIncludePrerelease: nextSettings.includePrerelease === true,
+          updatesShowFailed: nextSettings.showFailed === true,
         }).then(async (payload) => {
           if (!alive.current) return
-          const next = readSettings(payload)
-          setSettings(next)
-          if (next.settable === false) setNotice({ tone: 'warn', text: t('updatesSetsLocalOnly') })
+          const incoming = readSettings(payload)
+          // 响应没带配置（例如 {ok:true}）时保留乐观值，随后用 GET /updates 的 config 校准。
+          if (incoming.known) setSettings(previous => mergeSettings(previous, incoming))
+          if (incoming.settable === false) setNotice({ tone: 'warn', text: t('updatesSetsLocalOnly') })
           await load()
         }).catch((failure) => {
           if (alive.current) setNotice({ tone: 'error', text: t('updatesSettingsFailed', { error: String(failure?.message ?? failure) }) })
@@ -1846,14 +1974,27 @@ window.__ModuleLoader__.load({
       const visibleRows = React.useMemo(() => {
         const needle = search.trim().toLowerCase()
         return rows.filter((row) => {
-          const updatable = row.state === 'updatable' || row.state === 'skipped' || row.state === 'incompatible'
-          if (filter === 'updatable' && !updatable) return false
-          if (filter === 'failed' && !isFailedState(row.state)) return false
+          if (!inScope(row, settings.showFailed === true)) return false
           if (!visibleBySettings(row, settings)) return false
           if (needle !== '' && !row.name.toLowerCase().includes(needle)) return false
           return true
         })
-      }, [rows, filter, search, settings.includeDisabled, settings.includePrerelease])
+      }, [rows, search, settings.includeDisabled, settings.includePrerelease, settings.showFailed])
+
+      // 当前搜索范围内被「显示检查失败的项」开关隐藏的条目数（空态提示用）。
+      const hiddenFailedCount = React.useMemo(() => {
+        const needle = search.trim().toLowerCase()
+        return rows.filter(row => visibleBySettings(row, settings)
+          && (needle === '' || row.name.toLowerCase().includes(needle))
+          && !inScope(row, settings.showFailed === true) && inScope(row, true)).length
+      }, [rows, search, settings.includeDisabled, settings.includePrerelease, settings.showFailed])
+
+      // 当前搜索范围内是否一个候选都没有（用于区分「搜索无命中」与「没有可更新的项」）。
+      const searchedCount = React.useMemo(() => {
+        const needle = search.trim().toLowerCase()
+        return rows.filter(row => visibleBySettings(row, settings)
+          && (needle === '' || row.name.toLowerCase().includes(needle))).length
+      }, [rows, search, settings.includeDisabled, settings.includePrerelease])
 
       const installable = installableRows(visibleRows, settings)
       const selectedRows = visibleRows.filter(row => selected[row.key] === true)
@@ -1886,8 +2027,6 @@ window.__ModuleLoader__.load({
           return copy
         })
       }
-
-      const clearSelection = () => { setSelected({}) }
 
       const toggleExemptPanel = (key) => {
         setExemptPanels(previous => {
@@ -1940,43 +2079,78 @@ window.__ModuleLoader__.load({
         if (openPackage !== null) openPackage(name)
       }
 
+      /**
+       * 展开 / 收起「筛选」菜单（展开时先量一次落点，避免菜单出视口）。
+       * @returns {void}
+       */
+      const toggleSettingsMenu = () => {
+        if (settingsOpen === true) {
+          setSettingsOpen(false)
+          return
+        }
+        setMenuPos(measureMenuPlacement(settingsRef.current))
+        setSettingsOpen(true)
+      }
+
       const progressItems = progress?.items ?? []
       const progressReady = progressItems.length > 0 && progressItems.every(progressTerminal)
       const openConfirm = (target) => { setConfirm(target); setExemptAck({}); setConfirmSecond(null) }
 
       return h('div', { className: 'pmu-root' },
-        // 头部：标题 + 检查更新 + 上次检查时间
-        h('div', { className: 'pmu-head' },
-          h('h3', { className: 'pmu-title' }, t('updatesTab')),
-          h('button', { type: 'button', className: 'pmp-btn pmp-btnPrimary', disabled: busy !== '' || progress !== null && !progressReady, onClick: () => { void check() } },
-            busy === 'check' ? t('updatesChecking') : t('updatesCheck')),
-          h('span', { className: 'pmu-hint' }, checkedAt === null ? t('updatesNeverChecked') : t('updatesLastChecked', { time: formatClock(checkedAt) })),
-          h('span', { className: 'pmu-summaryActions' },
-            h('button', { type: 'button', className: 'pmp-btn', disabled: busy !== '' || installable.length === 0, onClick: () => { openConfirm({ rows: installable }) } }, t('updatesUpdateAll'))) ),
-
-        // 过滤 / 搜索 / 两个开关
+        // 工具条（单行）：检查更新 | 搜索框 | 齿轮设置 | 更新全部 | 更新已选
         h('div', { className: 'pmu-toolbar' },
-          ...FILTERS.map(key => h('button', {
-            type: 'button', key, className: 'pmu-chip', 'data-active': filter === key ? 'true' : 'false',
-            onClick: () => { setFilter(key) },
-          }, t(FILTER_LABEL_KEYS[key]))),
+          h('button', {
+            type: 'button', className: 'pmp-btn pmp-btnPrimary pmu-checkBtn',
+            disabled: busy !== '' || progress !== null && !progressReady,
+            onClick: () => { void check() },
+          }, busy === 'check' ? t('updatesChecking') : t('updatesCheck')),
           h('input', {
             className: 'pmu-search', type: 'search', value: search, placeholder: t('updatesSearchPlaceholder'),
             'aria-label': t('updatesSearchPlaceholder'), onChange: (event) => { setSearch(text(event?.target?.value)) },
           }),
-          h(UpdatesSwitchRow, {
+          // 齿轮设置：遮罩与菜单是 wrap 下的兄弟节点（菜单以 wrap 为包含块，不能嵌进全屏 fixed 遮罩）。
+          h('div', {
+            className: 'pmu-filterWrap pmu-settingsWrap', ref: settingsRef,
+            onKeyDown: (event) => { if (event?.key === 'Escape' && settingsOpen) setSettingsOpen(false) },
+          },
+          settingsOpen && h('div', { className: 'pmu-menuLayer', onClick: () => { setSettingsOpen(false) } }),
+          h('button', {
+            type: 'button', className: 'pmp-btn pmu-gearBtn',
+            'aria-haspopup': 'true', 'aria-expanded': settingsOpen ? 'true' : 'false',
+            'aria-label': t('updatesSettingsMenu'), title: t('updatesSettingsMenu'),
+            onClick: toggleSettingsMenu,
+          }, h('svg', {
+            className: 'pmu-gear', viewBox: '0 0 24 24', width: '15', height: '15',
+            'aria-hidden': 'true', focusable: 'false', fill: 'none', stroke: 'currentColor',
+            'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+          }, h('circle', { cx: '12', cy: '12', r: '3' }), h('path', { d: GEAR_PATH }))),
+          settingsOpen && h('div', {
+            className: 'pmu-menu pmu-settingsMenu', role: 'menu', 'aria-label': t('updatesSettingsMenu'),
+            'data-placement': menuPos === null ? 'bottom' : menuPos.placement,
+            'data-anchored': menuPos === null ? 'css' : 'fixed',
+            style: menuPos === null ? undefined : { position: 'fixed', left: `${menuPos.left}px`, top: `${menuPos.top}px` },
+            onClick: (event) => { event.stopPropagation() },
+          },
+          h(FilterMenuRow, {
+            checked: settings.showFailed === true,
+            disabled: settings.settable === false || busy !== '',
+            label: t('updatesShowFailed'),
+            onChange: (next) => { toggleSetting('showFailed', next) },
+          }),
+          h(FilterMenuRow, {
             checked: settings.includePrerelease === true,
             disabled: settings.settable === false || busy !== '',
             label: t('updatesIncludePrerelease'),
             onChange: (next) => { toggleSetting('includePrerelease', next) },
           }),
-          h(UpdatesSwitchRow, {
+          h(FilterMenuRow, {
             checked: settings.includeDisabled === true,
             disabled: settings.settable === false || busy !== '',
             label: t('updatesIncludeDisabled'),
             onChange: (next) => { toggleSetting('includeDisabled', next) },
-          })),
-        h('p', { className: 'pmu-hint' }, t('updatesSettingsHint')),
+          }))),
+          h('button', { type: 'button', className: 'pmp-btn', disabled: busy !== '' || installable.length === 0, onClick: () => { openConfirm({ rows: installable }) } }, t('updatesUpdateAll')),
+          h('button', { type: 'button', className: 'pmp-btn', disabled: busy !== '' || selectedCount === 0, onClick: () => { openConfirm({ rows: selectedRows }) } }, t('updatesUpdateSelected'))),
 
         notice !== null && h('p', { className: 'pmu-notice', 'data-tone': notice.tone }, notice.text),
         loadError !== '' && h('p', { className: 'pmu-error' }, t('updatesLoadFailed', { error: loadError })),
@@ -2003,19 +2177,19 @@ window.__ModuleLoader__.load({
               onChange: () => { toggleAll() },
             }),
             t('updatesSelectAll')),
-          h('span', { className: 'pmu-summaryText' }, t('updatesSummary', { updates: installable.length, selected: selectedCount }))),
+          h('span', { className: 'pmu-summaryText' }, t('updatesSummary', { updates: installable.length, selected: selectedCount })),
+          h('span', { className: 'pmu-summaryTime' }, checkedAt === null ? t('updatesNeverChecked') : t('updatesLastChecked', { time: formatTimeOnly(checkedAt) }))),
 
         // 列表
         visibleRows.length === 0
-          ? h('p', { className: 'pmu-hint' }, loaded ? (rows.length === 0 ? t('updatesEmpty') : t('updatesEmptyFilter')) : t('updatesLoading'))
+          ? h('p', { className: 'pmu-hint' }, loaded
+            ? (rows.length === 0
+              ? t('updatesEmpty')
+              : (searchedCount === 0
+                ? t('updatesEmptyFilter')
+                : (hiddenFailedCount > 0 && settings.showFailed !== true ? t('updatesEmptyShowFailed') : t('updatesEmptyNoUpdate'))))
+            : t('updatesLoading'))
           : h('div', { className: 'pmu-list' }, ...visibleRows.map(row => renderRow(row))),
-
-        // 底部批量栏
-        selectedCount > 0 && h('div', { className: 'pmu-bulk' },
-          h('span', { className: 'pmu-summaryText' }, t('updatesSelectedBar', { n: selectedCount })),
-          h('span', { className: 'pmu-bulkActions' },
-            h('button', { type: 'button', className: 'pmp-btn pmp-btnPrimary', disabled: busy !== '', onClick: () => { openConfirm({ rows: selectedRows }) } }, t('updatesBulkUpdate')),
-            h('button', { type: 'button', className: 'pmp-btn', onClick: clearSelection }, t('updatesCancel')))),
 
         // 更新确认框
         confirm !== null && h(UpdatesModal, {

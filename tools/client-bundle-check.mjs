@@ -52,7 +52,7 @@ function ok(value, label, detail) {
     passed += 1
     return
   }
-  failed.push({ section: currentSection, label, detail: detail === undefined ? undefined : safe(value) })
+  failed.push({ section: currentSection, label, detail: detail === undefined ? undefined : safe(detail) })
 }
 
 /**
@@ -154,9 +154,11 @@ const React = {
   useEffect(fn, deps) {
     const entry = slot()
     if (entry.value !== undefined && sameDeps(entry.deps, deps)) return
+    // 依赖变化（或首次执行）前先跑上一次的清理，等价 React 的 effect 语义。
+    if (typeof entry.cleanup === 'function') entry.cleanup()
     entry.value = fn
     entry.deps = deps
-    effectQueue.push(fn)
+    effectQueue.push({ fn, entry })
   },
   useLayoutEffect(fn, deps) {
     React.useEffect(fn, deps)
@@ -204,7 +206,8 @@ function render(Component, props) {
       const queue = effectQueue
       effectQueue = []
       for (const effect of queue) {
-        const cleanup = effect()
+        const cleanup = effect.fn()
+        effect.entry.cleanup = typeof cleanup === 'function' ? cleanup : undefined
         if (typeof cleanup === 'function') cleanups.push(cleanup)
       }
       tree = walk(root)
@@ -334,6 +337,34 @@ function statusBadges(view) {
 }
 
 /**
+ * 头部 `.pmu-head` 的结构签名（按渲染顺序）：filter / button:<文案> / hint:<文案>。
+ * @param {object} view - render 返回值。
+ * @returns {string[]} 签名数组。
+ */
+function headSignature(view) {
+  const head = view.elements().find(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-head'))
+  if (head === undefined) return []
+  return head.children.filter(child => child !== null).map((child) => {
+    const classes = String(child.props?.className ?? '').split(/\s+/u)
+    if (classes.includes('pmu-filterWrap')) return 'filter'
+    if (classes.includes('pmu-hint')) return `hint:${elementText(child).trim()}`
+    if (child.type === 'button') return `button:${elementText(child).trim()}`
+    return `other:${child.type}`
+  })
+}
+
+/**
+ * 收集 `role=switch` 的开关（筛选下拉里的两个开关）。
+ * @param {object} view - render 返回值。
+ * @returns {{label: string, checked: unknown, disabled: unknown, node: object}[]} 开关列表。
+ */
+function switchButtons(view) {
+  return view.elements()
+    .filter(element => element.type === 'button' && element.props?.role === 'switch')
+    .map(element => ({ label: String(element.props?.['aria-label'] ?? ''), checked: element.props?.['aria-checked'], disabled: element.props?.disabled, node: element }))
+}
+
+/**
  * 取最近一次 apply 注入的样式文本（每次 apply 都会追加一个 style 节点）。
  * @param {object} state - makeEnvironment 的 state。
  * @returns {string} CSS 文本。
@@ -420,9 +451,59 @@ function walk(node) {
     type: String(type),
     props: { ...props, children: childrenWalked },
     children: childrenWalked,
+    /**
+     * 布局桩：默认 width 0，让 measureMenuPlacement 判定拿不到布局而退化为纯 CSS 定位；
+     * 测试可用 setElementRect 注入真实 rect 来验证内联 fixed 坐标分支。
+     * @returns {{width: number, height: number, top: number, bottom: number, left: number}} 矩形。
+     */
+    getBoundingClientRect() {
+      if (elementRectProvider === null) return { width: 0, height: 0, top: 0, bottom: 0, left: 0 }
+      return elementRectProvider(element)
+    },
   }
   if (props?.ref !== null && typeof props?.ref === 'object') props.ref.current = element
   return element
+}
+
+/** 元素矩形注入器（默认 null ⇒ 走纯 CSS 定位分支）。 */
+let elementRectProvider = null
+
+/**
+ * 注入 getBoundingClientRect 的返回值（验证内联 fixed 定位分支）。
+ * @param {(element: object) => {width: number, height: number, top: number, bottom: number, left: number}} provider - 注入器。
+ * @returns {void}
+ */
+function setElementRect(provider) {
+  elementRectProvider = provider
+}
+
+/** 还原矩形注入器。 */
+function resetElementRect() {
+  elementRectProvider = null
+}
+
+/**
+ * 收集一个宿主元素的全部后代（不含自身）。
+ * @param {object|undefined} element - 宿主元素。
+ * @returns {object[]} 后代列表。
+ */
+function descendantsOf(element) {
+  const out = []
+  /**
+   * @param {unknown} node - 节点。
+   * @returns {void}
+   */
+  const visit = (node) => {
+    if (node === null || node === undefined || typeof node === 'string') return
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child)
+      return
+    }
+    out.push(node)
+    for (const child of node.children ?? []) visit(child)
+  }
+  for (const child of element?.children ?? []) visit(child)
+  return out
 }
 
 /**
@@ -482,14 +563,31 @@ function makeEnvironment() {
     responses: null,
   }
 
+  /** document 上的监听器（用于派发 Escape 等事件）。 */
+  const documentListeners = new Map()
   const documentStub = {
     head: { appendChild: node => state.styles.push(node) },
     body: { appendChild: () => {} },
     createElement: () => ({ dataset: {}, textContent: '', style: {}, setAttribute() {}, appendChild() {}, remove() {} }),
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener(name, listener) {
+      const list = documentListeners.get(name) ?? []
+      list.push(listener)
+      documentListeners.set(name, list)
+    },
+    removeEventListener(name, listener) {
+      const list = documentListeners.get(name) ?? []
+      documentListeners.set(name, list.filter(entry => entry !== listener))
+    },
     querySelector: () => null,
     querySelectorAll: () => [],
+    /** 派发一个 DOM 事件（测试用）。 */
+    dispatch(name, event) {
+      for (const listener of [...(documentListeners.get(name) ?? [])]) listener(event)
+    },
+    /** 当前某类监听器数量（测试用）。 */
+    listenerCount(name) {
+      return (documentListeners.get(name) ?? []).length
+    },
   }
 
   const windowStub = {
@@ -501,6 +599,8 @@ function makeEnvironment() {
     document: documentStub,
     addEventListener: () => {},
     removeEventListener: () => {},
+    innerWidth: 1280,
+    innerHeight: 800,
     location: { href: 'http://127.0.0.1:3080/' },
     navigator: { clipboard: { writeText: async () => {} } },
     matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }),
@@ -627,7 +727,7 @@ function loadClient() {
  * @returns {Function} fetch 实现。
  */
 function makeBridge(options = {}) {
-  const settings = { updatesIncludeDisabled: false, updatesIncludePrerelease: false, ...(options.settings ?? {}) }
+  const settings = { updatesIncludeDisabled: false, updatesIncludePrerelease: false, updatesShowFailed: false, ...(options.settings ?? {}) }
   const calls = []
   let stateIndex = 0
   const impl = async (url, init = {}) => {
@@ -641,17 +741,22 @@ function makeBridge(options = {}) {
       text: async () => JSON.stringify(payload),
     })
     if (url === `${API}/updates` && method === 'GET') {
+      // updatesDelayMs 用于拉长「POST 已处理、GET 还没回来」的窗口，让中间态可被采样捕捉。
+      if (typeof options.updatesDelayMs === 'number' && options.updatesDelayMs > 0) await sleep(options.updatesDelayMs)
       return json({
         ok: true,
         candidates: options.candidates ?? [],
-        checkedAt: options.checkedAt ?? Date.now() - 60_000,
+        checkedAt: options.checkedAt === undefined ? Date.now() - 60_000 : options.checkedAt,
         index: { sources: 1, packages: (options.candidates ?? []).length, error: null },
-        config: { ...settings },
+        // `updatesConfig` 可显式覆盖（例如给 {} 验证「响应没说」时不得覆盖本地状态）。
+        config: options.updatesConfig === undefined ? { ...settings } : options.updatesConfig,
         running: options.running === true,
       })
     }
     if (url === `${API}/settings` && method === 'POST') {
       Object.assign(settings, body ?? {})
+      if (typeof options.settingsResponse === 'function') return json(options.settingsResponse({ ...settings }, body ?? {}))
+      if (options.settingsResponse !== undefined) return json(options.settingsResponse)
       return json({ ok: true, saved: true, status: { config: { ...settings } } })
     }
     if (url === `${API}/updates/check`) {
@@ -872,7 +977,328 @@ section('渲染：桥接失败不崩')
   eq(loaded.state.consoleErrors.length, 0, '桥接 500 不产生 console.error')
 }
 
-section('交互：更新全部 → 确认 → apply 载荷契约')
+section('工具条单行：检查更新 → 搜索 → 齿轮 → 更新全部 → 更新已选')
+{
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const t = ctx.locale.bind()
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+  const toolbarSignature = (view) => {
+    const toolbar = view.elements().find(hasClass('pmu-toolbar'))
+    if (toolbar === undefined) return []
+    return toolbar.children.filter(child => child !== null).map((child) => {
+      const classes = String(child.props?.className ?? '').split(/\s+/u)
+      if (child.type === 'input' && classes.includes('pmu-search')) return 'search'
+      if (classes.includes('pmu-filterWrap')) return 'gearWrap'
+      if (child.type === 'button') return `button:${elementText(child).trim()}`
+      return `other:${child.type}`
+    })
+  }
+  const gearButton = (view) => view.elements().find(element => element.type === 'button' && element.props?.['aria-label'] === '设置')
+  const summaryOf = (view) => view.elements().find(hasClass('pmu-summary'))
+
+  // 已检查：统计条最右显示「上次检查 HH:MM」。
+  const checkedAt = Date.now() - 5 * 60_000
+  const bridge = makeBridge({ candidates: CANDIDATES, checkedAt })
+  loaded.state.responses = (url, init) => bridge(url, init)
+  const view = render(tab.component, { t, openPackage: () => {} })
+  await settle(view)
+  eq(toolbarSignature(view), ['button:检查更新', 'search', 'gearWrap', 'button:更新全部', 'button:更新已选'], '工具条单行次序：检查更新 → 搜索 → 齿轮 → 更新全部 → 更新已选')
+  ok(gearButton(view) !== undefined, '有齿轮设置按钮', view.elements().filter(element => element.type === 'button').map(element => element.props?.['aria-label']))
+  eq(gearButton(view)?.props?.['aria-label'], '设置', '齿轮 aria-label=设置')
+  eq(elementText(gearButton(view) ?? {}).trim(), '', '齿轮按钮无文字')
+  eq(gearButton(view)?.props?.title, '设置', '齿轮 title=设置')
+  eq(gearButton(view)?.props?.['aria-haspopup'], 'true', '齿轮 aria-haspopup=true')
+  eq(gearButton(view)?.props?.['aria-expanded'], 'false', '齿轮初始 aria-expanded=false')
+  eq(view.elements().filter(hasClass('pmu-title')).length, 0, '不再渲染标题')
+  eq(view.elements().filter(element => element.type === 'select').length, 0, '页面没有 select 过滤下拉')
+  eq(view.elements().filter(hasClass('pmu-filterSelect')).length, 0, '没有 pmu-filterSelect')
+  eq(view.elements().filter(hasClass('pmu-chip')).length, 0, '没有 pmu-chip')
+  eq(findClickable(view, text => text.trim() === '更新已选')?.props?.disabled, true, '无选中时「更新已选」禁用')
+  const toolbarCss = latestCss(loaded.state)
+  eq(cssRule(toolbarCss, '.pmu-filterSelect'), '', 'CSS 里没有 .pmu-filterSelect 规则')
+  eq(cssRule(toolbarCss, '.pmu-chip'), '', 'CSS 里没有 .pmu-chip 规则')
+  ok(cssRule(toolbarCss, '.pmu-gearBtn').includes('width:30px'), 'CSS 里有 .pmu-gearBtn 样式', cssRule(toolbarCss, '.pmu-gearBtn'))
+
+  // 统计条：全选 / 统计文本 / 检查时间，同一行且时间在最右（margin-left:auto）。
+  const summary = summaryOf(view)
+  ok(summary !== undefined, '有统计条', view.texts().slice(0, 200))
+  eq((summary?.children ?? []).map(child => String(child?.props?.className ?? '').split(/\s+/u)[0] ?? ''), ['pmu-selectAll', 'pmu-summaryText', 'pmu-summaryTime'], '统计条同一行：全选 → 统计文本 → 检查时间（最右）')
+  const time = new Date(checkedAt)
+  const hhmm = `${String(time.getHours()).padStart(2, '0')}:${String(time.getMinutes()).padStart(2, '0')}`
+  eq(elementText(summary?.children?.[2] ?? {}).trim(), `上次检查 ${hhmm}`, '统计条时间格式：上次检查 HH:MM')
+  eq(cssValue(latestCss(loaded.state), '.pmu-summaryTime', 'margin-left'), 'auto', '统计条时间使用 margin-left:auto 靠右')
+
+  // 未检查：显示「尚未检查」。
+  const bridge2 = makeBridge({ candidates: CANDIDATES, checkedAt: null })
+  loaded.state.responses = (url, init) => bridge2(url, init)
+  const view2 = render(tab.component, { t, openPackage: () => {} })
+  await settle(view2)
+  eq(elementText(summaryOf(view2)?.children?.[2] ?? {}).trim(), '尚未检查', '未检查时统计条显示「尚未检查」')
+  eq(loaded.state.consoleErrors.length, 0, '工具条渲染没有 console.error', loaded.state.consoleErrors)
+}
+
+
+section('默认范围：只显示有更新的项；「显示检查失败的项」开关追加失败类')
+{
+  const rowNames = (view) => view.elements()
+    .filter(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-nameCell'))
+    .map(element => elementText(element).trim())
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+  const gearButton = (view) => view.elements().find(element => element.type === 'button' && element.props?.['aria-label'] === '设置')
+  const scopeCandidates = [
+    { name: 's-updatable', current: '1.0.0', latest: '1.1.0', kind: 'npm', state: 'available', enabled: true, prerelease: false, deprecated: null },
+    { name: 's-skipped', current: '1.0.0', latest: '1.1.0-rc.1', kind: 'npm', state: 'skipped', enabled: true, prerelease: true, deprecated: null },
+    { name: 's-incompatible', current: '1.0.0', latest: '2.0.0', kind: 'npm', state: 'available', enabled: true, prerelease: false, deprecated: null, incompatible: { name: 's-incompatible', version: '2.0.0', runtimeVersion: '0.3.9', requirements: { 'engines.dsh': '>=0.4.0' } } },
+    { name: 's-failed', current: '1.0.0', latest: '1.1.0', kind: 'npm', state: 'error', enabled: true, prerelease: false, deprecated: null },
+    { name: 's-uncheckable', current: '1.0.0', latest: '', kind: 'git', state: 'uncheckable', enabled: true, prerelease: false, deprecated: null },
+    { name: 's-unknown', current: '1.0.0', latest: '', kind: 'npm', state: 'unknown', enabled: true, prerelease: false, deprecated: null },
+  ]
+  /**
+   * 渲染一次。
+   * @param {object} bridge - 假桥接。
+   * @returns {Promise<object>} view。
+   */
+  const openView = async (bridge) => {
+    const ctx = makePluginContext(loaded.state)
+    loaded.exports.apply(ctx)
+    loaded.state.responses = (url, init) => bridge(url, init)
+    const view = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+    await settle(view)
+    return view
+  }
+
+  const bridge = makeBridge({ candidates: scopeCandidates })
+  const view = await openView(bridge)
+  eq(rowNames(view), ['s-updatable', 's-skipped', 's-incompatible'], '默认范围只显示 可更新 / 暂不推荐 / 不兼容（failed/uncheckable/unknown 不显示）')
+
+  gearButton(view)?.props.onClick()
+  await settle(view)
+  eq(switchButtons(view).map(entry => entry.label), ['显示检查失败的项', '包含预发布/已废弃', '包含已禁用的插件'], '齿轮菜单含三个开关')
+  eq(switchButtons(view).map(entry => entry.checked), ['false', 'false', 'false'], '三个开关初始都关')
+  switchButtons(view)[0].node.props.onClick()
+  await settle(view)
+  const post = bridge.calls.find(call => call.url === `${API}/settings`)
+  eq(post?.body?.updatesShowFailed, true, '打开开关 POST /settings updatesShowFailed:true')
+  eq(post?.body?.updatesIncludeDisabled, false, 'POST 同时带上 includeDisabled 当前值')
+  eq(post?.body?.updatesIncludePrerelease, false, 'POST 同时带上 includePrerelease 当前值')
+  eq(switchButtons(view)[0]?.checked, 'true', '开关 aria-checked 变为 true')
+  eq(rowNames(view), ['s-updatable', 's-skipped', 's-incompatible', 's-failed', 's-uncheckable', 's-unknown'], '打开后追加 failed/uncheckable/unknown 三项')
+
+  // 搜索仍叠加。
+  const search = view.elements().find(element => element.props?.className === 'pmu-search')
+  search?.props?.onChange({ target: { value: 's-failed' } })
+  await settle(view)
+  eq(rowNames(view), ['s-failed'], '搜索与范围叠加：只剩 s-failed')
+  search?.props?.onChange({ target: { value: '' } })
+  await settle(view)
+
+  // 关闭开关：失败类消失。
+  switchButtons(view)[0].node.props.onClick()
+  await settle(view)
+  const postOff = bridge.calls.filter(call => call.url === `${API}/settings`).at(-1)
+  eq(postOff?.body?.updatesShowFailed, false, '关闭开关 POST updatesShowFailed:false')
+  eq(rowNames(view), ['s-updatable', 's-skipped', 's-incompatible'], '关闭后失败类项消失')
+
+  // 空态：只有失败项且开关关闭 → 提示去设置打开。
+  const onlyFailed = [{ name: 'only-failed', current: '1.0.0', latest: '1.1.0', kind: 'npm', state: 'error', enabled: true, prerelease: false, deprecated: null }]
+  const viewEmpty = await openView(makeBridge({ candidates: onlyFailed }))
+  ok(viewEmpty.texts().join(' | ').includes('显示检查失败的项'), '只有失败项且开关关闭时，空态提示打开「显示检查失败的项」', viewEmpty.texts().slice(-300))
+  // 收尾：关闭仍打开的齿轮菜单，释放 document keydown。
+  if (switchButtons(view).length > 0) {
+    gearButton(view)?.props.onClick()
+    await settle(view)
+  }
+  eq(loaded.state.consoleErrors.length, 0, '默认范围用例没有 console.error', loaded.state.consoleErrors)
+}
+
+
+section('齿轮设置菜单：三开关 / 遮罩与 Escape / 持久化')
+{
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const bridge = makeBridge({ candidates: CANDIDATES })
+  loaded.state.responses = (url, init) => bridge(url, init)
+  const t = ctx.locale.bind()
+  const view = render(tab.component, { t, openPackage: () => {} })
+  await settle(view)
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+  const menuCount = () => view.elements().filter(hasClass('pmu-settingsMenu')).length
+  const gearButton = () => view.elements().find(element => element.type === 'button' && element.props?.['aria-label'] === '设置')
+  ok(gearButton() !== undefined, '有齿轮设置按钮')
+  eq(gearButton()?.props?.['aria-haspopup'], 'true', '齿轮 aria-haspopup=true')
+  eq(gearButton()?.props?.['aria-expanded'], 'false', '初始 aria-expanded=false')
+  eq(menuCount(), 0, '初始没有设置菜单')
+  eq(switchButtons(view).length, 0, '菜单未打开时没有开关')
+
+  gearButton()?.props.onClick()
+  await settle(view)
+  eq(gearButton()?.props?.['aria-expanded'], 'true', '打开后 aria-expanded=true')
+  const menu = view.elements().find(hasClass('pmu-settingsMenu'))
+  ok(menu !== undefined, '点击齿轮打开设置菜单', view.texts().slice(-12))
+  eq(menu?.props?.role, 'menu', '菜单 role=menu')
+  eq(menu?.props?.['aria-label'], '设置', '菜单 aria-label=设置')
+  eq(switchButtons(view).map(entry => entry.label), ['显示检查失败的项', '包含预发布/已废弃', '包含已禁用的插件'], '菜单三个开关（显示检查失败 / 预发布·已废弃 / 已禁用）')
+  eq(switchButtons(view).map(entry => entry.checked), ['false', 'false', 'false'], '三个开关初始都是关')
+
+  // 切中间那个（预发布）开关：POST /settings 持久化、菜单不收起、其他开关不变。
+  switchButtons(view)[1].node.props.onClick()
+  await settle(view)
+  eq(menuCount(), 1, '切开关不收起菜单')
+  const post = bridge.calls.find(call => call.url === `${API}/settings`)
+  eq(post?.method, 'POST', '切开关 POST /settings')
+  eq(post?.body?.updatesIncludePrerelease, true, 'POST updatesIncludePrerelease:true')
+  eq(post?.body?.updatesShowFailed, false, 'POST 同时带上 showFailed 的当前值 false')
+  eq(switchButtons(view).map(entry => entry.checked), ['false', 'true', 'false'], '只有被切的开关变 true')
+
+  // 遮罩点击关闭。
+  const layer = view.elements().find(hasClass('pmu-menuLayer'))
+  ok(layer !== undefined, '齿轮菜单有全屏遮罩', view.texts().slice(-12))
+  layer?.props.onClick()
+  await settle(view)
+  eq(menuCount(), 0, '点遮罩关闭菜单')
+  eq(gearButton()?.props?.['aria-expanded'], 'false', '关闭后 aria-expanded=false')
+
+  // 菜单内点击不关闭。
+  gearButton()?.props.onClick()
+  await settle(view)
+  view.elements().find(hasClass('pmu-settingsMenu'))?.props.onClick({ stopPropagation() {} })
+  await settle(view)
+  eq(menuCount(), 1, '菜单内点击不关闭')
+
+  // Escape（document 监听）关闭并解绑。
+  loaded.documentStub.dispatch('keydown', { key: 'Escape' })
+  await settle(view)
+  eq(menuCount(), 0, 'Escape 关闭设置菜单')
+  eq(loaded.documentStub.listenerCount('keydown'), 0, '关闭后解绑 document keydown')
+
+  // 点齿轮开合。
+  gearButton()?.props.onClick()
+  await settle(view)
+  eq(menuCount(), 1, '点齿轮打开')
+  gearButton()?.props.onClick()
+  await settle(view)
+  eq(menuCount(), 0, '再点齿轮收起')
+  eq(loaded.state.consoleErrors.length, 0, '齿轮菜单交互没有 console.error', loaded.state.consoleErrors)
+}
+
+
+section('齿轮开关解析与乐观更新（回归：POST 响应缺配置不得清零）')
+{
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  /**
+   * 渲染一次并打开齿轮菜单。
+   * @param {object} bridge - 假桥接。
+   * @returns {Promise<object>} view。
+   */
+  const openMenu = async (bridge) => {
+    const ctx = makePluginContext(loaded.state)
+    loaded.exports.apply(ctx)
+    loaded.state.responses = (url, init) => bridge(url, init)
+    const view = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+    await settle(view)
+    view.elements().find(element => element.type === 'button' && element.props?.['aria-label'] === '设置')?.props.onClick()
+    await settle(view)
+    return view
+  }
+  const switchEntry = (view, label) => switchButtons(view).find(entry => entry.label === label)
+  const switchState = (view) => switchButtons(view).map(entry => entry.checked)
+  /**
+   * 连续采样三个开关的状态，捕捉「一起被清零」的中间态。
+   * @param {object} view - view。
+   * @param {number} steps - 采样次数。
+   * @returns {Promise<string[]>} 形如 'false/false/false' 的样本。
+   */
+  const sampleSwitches = async (view, steps = 40) => {
+    const samples = []
+    for (let index = 0; index < steps; index += 1) {
+      await sleep(2)
+      view.flush()
+      const states = switchState(view)
+      if (states.length === 3) samples.push(states.join('/'))
+    }
+    return samples
+  }
+
+  // A) POST 返回 status.config（真实 Host 形状）：三个开关保持该值，中途不出现一起变 false。
+  const bridgeA = makeBridge({
+    candidates: CANDIDATES,
+    settingsResponse: { ok: true, saved: true, status: { config: { updatesShowFailed: true, updatesIncludePrerelease: false, updatesIncludeDisabled: false } } },
+    updatesDelayMs: 25,
+  })
+  const viewA = await openMenu(bridgeA)
+  eq(switchState(viewA), ['false', 'false', 'false'], '初始三个开关都关')
+  switchEntry(viewA, '显示检查失败的项')?.node.props.onClick()
+  viewA.flush()
+  eq(switchState(viewA), ['true', 'false', 'false'], '点击后立即乐观显示 true（另外两个保持 false）')
+  const samplesA = await sampleSwitches(viewA, 40)
+  ok(samplesA.length >= 5, '采样到足够多的中间态（防止空样本导致断言空转）', samplesA.length)
+  ok(samplesA.every(sample => sample !== 'false/false/false'), '解析响应 / 重载期间不会出现三个开关一起 false 的中间态', samplesA)
+  eq(switchState(viewA), ['true', 'false', 'false'], '最终值与 POST 响应的 status.config 一致')
+  const postA = bridgeA.calls.find(call => call.url === `${API}/settings`)
+  eq(postA?.body?.updatesShowFailed, true, 'POST /settings 带 updatesShowFailed:true')
+  eq(postA?.body?.updatesIncludePrerelease, false, 'POST 带 includePrerelease 当前值 false')
+
+  // B) POST 只回 {ok:true}，且 GET /updates 也不带配置：乐观值不得被覆盖。
+  const bridgeB = makeBridge({ candidates: CANDIDATES, settingsResponse: { ok: true }, updatesConfig: {}, updatesDelayMs: 25 })
+  const viewB = await openMenu(bridgeB)
+  switchEntry(viewB, '显示检查失败的项')?.node.props.onClick()
+  viewB.flush()
+  eq(switchState(viewB), ['true', 'false', 'false'], 'POST 只回 {ok:true} 时乐观值立即生效')
+  const samplesB = await sampleSwitches(viewB, 40)
+  ok(samplesB.length >= 5, '缺配置场景同样采样到足够多的中间态', samplesB.length)
+  ok(samplesB.every(sample => sample !== 'false/false/false'), '响应缺配置时也没有一起 false 的中间态', samplesB)
+  eq(switchState(viewB), ['true', 'false', 'false'], 'GET /updates 缺 config 时乐观值保持不变')
+
+  // C) 单开关切换不影响其他：预发布本来开着，切「显示检查失败」后它必须保持 true。
+  const bridgeC = makeBridge({
+    candidates: CANDIDATES,
+    settings: { updatesIncludePrerelease: true },
+    settingsResponse: { ok: true, saved: true, status: { config: { updatesShowFailed: true, updatesIncludePrerelease: true, updatesIncludeDisabled: false } } },
+  })
+  const viewC = await openMenu(bridgeC)
+  eq(switchState(viewC), ['false', 'true', 'false'], '预置预发布开关为开')
+  switchEntry(viewC, '显示检查失败的项')?.node.props.onClick()
+  const samplesC = await sampleSwitches(viewC, 40)
+  ok(samplesC.length >= 5, '单开关场景采样到足够多的中间态', samplesC.length)
+  ok(samplesC.every(sample => sample.split('/')[1] === 'true'), '切一个开关期间预发布开关始终为 true', samplesC)
+  eq(switchState(viewC), ['true', 'true', 'false'], '最终显示检查失败与预发布都是 true')
+  eq(bridgeC.calls.find(call => call.url === `${API}/settings`)?.body?.updatesIncludePrerelease, true, 'POST 带上另一个开关的真实值（未被清零）')
+
+  // D) GET /updates 顶层 config 仍能应用（含 showFailed / includeXxx 别名）。
+  const bridgeD = makeBridge({ candidates: CANDIDATES, updatesConfig: { showFailed: true, includePrerelease: true } })
+  const viewD = await openMenu(bridgeD)
+  eq(switchState(viewD), ['true', 'true', 'false'], 'GET /updates 顶层 config（别名键 showFailed / includePrerelease）正确应用')
+
+  // E/F) settable 由 saved === false 推导；纯函数独立复算。
+  const bridgeE = makeBridge({ candidates: CANDIDATES, settingsResponse: { ok: true, saved: false, status: { config: { updatesShowFailed: true, updatesIncludePrerelease: false, updatesIncludeDisabled: false } } } })
+  const viewE = await openMenu(bridgeE)
+  switchEntry(viewE, '显示检查失败的项')?.node.props.onClick()
+  await settle(viewE, 60)
+  ok(viewE.texts().join(' | ').includes('只对本次运行生效'), 'saved:false 时提示「只对本次运行生效」', viewE.texts().slice(0, 400))
+  const bridgeF = makeBridge({ candidates: CANDIDATES, settingsResponse: { ok: true, saved: true, status: { config: { updatesShowFailed: true, updatesIncludePrerelease: false, updatesIncludeDisabled: false } } } })
+  const viewF = await openMenu(bridgeF)
+  switchEntry(viewF, '显示检查失败的项')?.node.props.onClick()
+  await settle(viewF, 60)
+  ok(!viewF.texts().join(' | ').includes('只对本次运行生效'), 'saved:true 时不出现该提示', viewF.texts().slice(0, 400))
+
+  const info = loaded.exports.inspectable()
+  eq(typeof info.readSettings, 'function', 'inspectable 暴露 readSettings（纯函数）')
+  eq(info.readSettings?.({ ok: true, saved: false, status: { config: { updatesShowFailed: true } } })?.settable, false, 'readSettings：saved:false ⇒ settable=false')
+  eq(info.readSettings?.({ ok: true, saved: true, status: { config: { updatesShowFailed: true } } })?.settable, true, 'readSettings：saved:true ⇒ settable=true')
+  eq(info.readSettings?.({ ok: true, status: { config: { updatesShowFailed: true, updatesIncludePrerelease: false } } })?.known, true, 'readSettings：嵌套 status.config 命中 ⇒ known=true')
+  eq(info.readSettings?.({ ok: true, status: { config: { updatesShowFailed: true } } })?.showFailed, true, 'readSettings：解析 status.config.updatesShowFailed')
+  eq(info.readSettings?.({ ok: true, config: { showFailed: true } })?.showFailed, true, 'readSettings：顶层 config.showFailed 别名')
+  eq(info.readSettings?.({ ok: true })?.known, false, 'readSettings：无配置 ⇒ known=false')
+  eq(info.mergeSettings?.({ includeDisabled: true, includePrerelease: true, showFailed: true, settable: true }, { showFailed: false }), { includeDisabled: true, includePrerelease: true, showFailed: false, settable: true }, 'mergeSettings：只并入确实提供的字段')
+  eq(loaded.state.consoleErrors.length, 0, '开关解析用例没有 console.error', loaded.state.consoleErrors)
+}
+
+
+section('筛选菜单结构：不在遮罩内 / 兄弟节点 / 层级与视口约束')
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
@@ -883,38 +1309,187 @@ section('交互：更新全部 → 确认 → apply 载荷契约')
   const view = render(tab.component, { t, openPackage: () => {} })
   await settle(view)
 
-  // 先「全选」= 选中所有可安装项，底部批量栏才会出现「更新全部」。
-  const selectAll = findCheckable(view)
-  ok(selectAll !== null, '统计条有勾选框', view.elements().filter(element => element.type === 'input').map(element => element.props?.['aria-label']))
-  const selectAllHandler = typeof selectAll?.props?.onChange === 'function' ? selectAll.props.onChange : selectAll?.props?.onClick
-  selectAllHandler?.({ target: { checked: true }, currentTarget: { checked: true } })
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+  const gearButton = () => view.elements().find(element => element.type === 'button' && element.props?.['aria-label'] === '设置')
+  gearButton()?.props.onClick()
   await settle(view)
 
-  const bulk = findClickable(view, text => text.includes('更新全部'))
-  ok(bulk !== null, '全选后出现「更新全部」按钮', view.texts().slice(-14))
-  if (bulk !== null) {
-    bulk.props.onClick()
-    await settle(view)
-    const dialog = view.texts().join(' | ')
-    ok(dialog.includes('确认更新'), '点「更新全部」打开确认框', dialog.slice(-400))
-    const start = findClickable(view, text => text.trim() === '开始更新')
-    ok(start !== null, '确认框里有「开始更新」按钮', view.texts().slice(-14))
-    if (start !== null) {
-      start.props.onClick()
-      await settle(view)
-      const apply = bridge.calls.find(call => call.url === `${API}/updates/apply`)
-      ok(apply !== undefined, '确认后 POST /updates/apply', bridge.calls.map(call => `${call.method} ${call.url}`))
-      const names = (apply?.body?.items ?? []).map(item => item.name)
-      ok(names.includes('demo-plugin-a'), 'apply items 含 demo-plugin-a', apply?.body)
-      ok(names.includes('demo-plugin-b'), 'apply items 含 demo-plugin-b', apply?.body)
-      ok(!names.includes('demo-plugin-c'), '不兼容的 demo-plugin-c 默认不进「更新全部」', names)
-      ok((apply?.body?.items ?? []).every(item => Object.keys(item).every(key => ['name', 'spec', 'commit'].includes(key))), 'apply items 只带 name/spec/commit', apply?.body)
-      ok(apply?.body?.requestId === undefined, 'apply 请求体不带 requestId（Host 契约不接这个参数）', apply?.body)
-      const gitItem = (apply?.body?.items ?? []).find(item => item.name === 'demo-plugin-b')
-      ok(typeof gitItem?.spec === 'string' && gitItem.spec.includes('#'), 'git 项带上索引里的固定 spec', gitItem)
-    }
+  const filterWrap = view.elements().find(hasClass('pmu-filterWrap'))
+  const layer = view.elements().find(hasClass('pmu-menuLayer'))
+  const menu = view.elements().find(hasClass('pmu-menu'))
+  ok(filterWrap !== undefined && layer !== undefined && menu !== undefined, '打开后有 filterWrap / menuLayer / menu', view.texts().slice(0, 120))
+
+  // 1) 关键回归：菜单不能嵌在全屏 fixed 遮罩里（否则绝对定位的包含块变成视口，菜单掉到屏幕外）。
+  ok(!descendantsOf(layer).includes(menu), '菜单不是全屏遮罩的后代')
+  ok(!descendantsOf(menu).includes(layer), '遮罩也不是菜单的后代')
+  ok(filterWrap?.children.includes(layer) === true, '遮罩是 filterWrap 的直接子节点')
+  ok(filterWrap?.children.includes(menu) === true, '菜单是 filterWrap 的直接子节点')
+  const childClasses = (filterWrap?.children ?? []).map(child => String(child?.props?.className ?? '').split(/\s+/u))
+  const layerIndex = childClasses.findIndex(list => list.includes('pmu-menuLayer'))
+  const buttonIndex = childClasses.findIndex(list => list.includes('pmu-gearBtn'))
+  const menuIndex = childClasses.findIndex(list => list.includes('pmu-menu'))
+  ok(layerIndex < buttonIndex && buttonIndex < menuIndex, 'filterWrap 子节点次序：遮罩 → 按钮 → 菜单', { layerIndex, buttonIndex, menuIndex })
+  eq(menu?.props?.['data-anchored'], 'css', '拿不到布局信息时退化为纯 CSS 定位（data-anchored=css）')
+  ok(menu?.props?.style === undefined, '纯 CSS 定位时没有内联坐标覆盖', menu?.props?.style)
+
+  // 反向对照：同样的结构若被嵌进遮罩（t21 的旧缺陷），上面的检查必须能发现。
+  const fakeMenu = { props: { className: 'pmu-menu' }, children: [] }
+  const fakeLayer = { props: { className: 'pmu-menuLayer' }, children: [fakeMenu] }
+  const fakeWrap = { props: { className: 'pmu-filterWrap' }, children: [fakeLayer] }
+  ok(descendantsOf(fakeLayer).includes(fakeMenu), '对照：菜单嵌在遮罩内时能被检测为后代')
+  ok(!fakeWrap.children.includes(fakeMenu), '对照：嵌套时菜单不是 filterWrap 的直接子节点')
+
+  // 2) CSS：定位包含块、层级、视口约束与换向规则。
+  const css = latestCss(loaded.state)
+  eq(cssValue(css, '.pmu-filterWrap', 'position'), 'relative', 'filterWrap 是定位包含块（position:relative）')
+  eq(cssValue(css, '.pmu-menuLayer', 'position'), 'fixed', '遮罩仍是全屏 fixed')
+  eq(cssValue(css, '.pmu-menuLayer', 'inset'), '0', '遮罩 inset:0（全屏）')
+  eq(cssValue(css, '.pmu-menuLayer', 'z-index'), '30', '遮罩 z-index=30')
+  eq(cssValue(css, '.pmu-menu', 'position'), 'absolute', '菜单相对 filterWrap 绝对定位（不再相对全屏遮罩）')
+  eq(cssValue(css, '.pmu-menu', 'top'), 'calc(100% + 6px)', '菜单贴在按钮正下方 6px')
+  eq(cssValue(css, '.pmu-menu', 'z-index'), '41', '菜单 z-index=41')
+  ok(Number(cssValue(css, '.pmu-menu', 'z-index')) > Number(cssValue(css, '.pmu-menuLayer', 'z-index')), '菜单在遮罩之上（41 > 30）')
+  ok(Number(cssValue(css, '.pmu-gearBtn', 'z-index')) > Number(cssValue(css, '.pmu-menuLayer', 'z-index')), '齿轮按钮也在遮罩之上，可直接再点收起')
+  ok(cssValue(css, '.pmu-menu', 'max-width') === 'min(320px,92vw)' && cssValue(css, '.pmu-menu', 'max-height') === 'min(70vh,360px)', '菜单有视口尺寸约束', { maxWidth: cssValue(css, '.pmu-menu', 'max-width'), maxHeight: cssValue(css, '.pmu-menu', 'max-height') })
+  eq(cssValue(css, '.pmu-menu', 'overflow'), 'auto', '菜单内容可滚动')
+  ok(/\.pmu-menu\[data-placement="top"\]\[data-anchored="css"\]\{[^}]*bottom:calc\(100% \+ 6px\)/u.test(css), '换向规则只在纯 CSS 定位时生效', css.match(/\.pmu-menu\[data-placement[^}]*\}/u)?.[0])
+
+  // 3) 交互：菜单内点击不关闭 / 再点按钮收起 / 遮罩关闭 / Escape 关闭 / aria-expanded 同步。
+  eq(gearButton()?.props?.['aria-expanded'], 'true', '展开时 aria-expanded=true')
+  menu?.props.onClick({ stopPropagation() {} })
+  await settle(view)
+  eq(view.elements().filter(hasClass('pmu-menu')).length, 1, '菜单内点击不关闭')
+  gearButton()?.props.onClick()
+  await settle(view)
+  eq(view.elements().filter(hasClass('pmu-menu')).length, 0, '再点按钮收起')
+  eq(gearButton()?.props?.['aria-expanded'], 'false', '收起后 aria-expanded=false')
+  gearButton()?.props.onClick()
+  await settle(view)
+  view.elements().find(hasClass('pmu-menuLayer'))?.props.onClick()
+  await settle(view)
+  eq(view.elements().filter(hasClass('pmu-menu')).length, 0, '点遮罩关闭')
+  gearButton()?.props.onClick()
+  await settle(view)
+  loaded.documentStub.dispatch('keydown', { key: 'Escape' })
+  await settle(view)
+  eq(view.elements().filter(hasClass('pmu-menu')).length, 0, 'Escape 关闭')
+  eq(gearButton()?.props?.['aria-expanded'], 'false', 'Escape 后 aria-expanded=false')
+  eq(loaded.state.consoleErrors.length, 0, '结构交互没有 console.error', loaded.state.consoleErrors)
+}
+
+section('menuPlacement 与内联 fixed 兑底（独立复算）')
+{
+  const info = loaded.exports.inspectable()
+  eq(typeof info.menuPlacement, 'function', 'inspectable 暴露 menuPlacement（纯函数）')
+  const place = info.menuPlacement
+  if (typeof place === 'function') {
+    const anchor = { top: 100, bottom: 128, left: 300 }
+    const viewport = { width: 1280, height: 800 }
+    const size = { width: 240, height: 108 }
+    const below = place(anchor, viewport, size)
+    eq({ left: below.left, top: below.top, placement: below.placement }, { left: 300, top: 134, placement: 'bottom' }, '下方放得下时贴在按钮下方（bottom + 6）')
+    const flipped = place({ top: 760, bottom: 788, left: 1200 }, viewport, size)
+    eq(flipped.placement, 'top', '下方放不下时换向到上方')
+    eq(flipped.top, 760 - 6 - 108, '换向后 top = anchor.top - gap - menuHeight')
+    eq(flipped.left, 1280 - 240 - 8, '右侧贴边收敛到 viewport - menuWidth - 8')
+    eq(place({ top: 0, bottom: 20, left: 0 }, { width: 320, height: 200 }, size).left, 8, '左侧贴边保留 8px')
+    eq(place(anchor, { width: 0, height: 0 }, size).placement, 'bottom', '视口尺寸未知（0）时保守选下方')
   }
-  eq(loaded.state.consoleErrors.length, 0, '交互过程没有 console.error', loaded.state.consoleErrors)
+
+  // 内联 fixed 兑底：给 filterWrap 注入真实 rect（按钮位于视口下方附近）→ 菜单用内联坐标定位。
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const bridge = makeBridge({ candidates: CANDIDATES })
+  loaded.state.responses = (url, init) => bridge(url, init)
+  const t = ctx.locale.bind()
+  setElementRect(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-filterWrap')
+    ? { width: 120, height: 28, top: 570, bottom: 598, left: 100 }
+    : { width: 0, height: 0, top: 0, bottom: 0, left: 0 })
+  const view = render(tab.component, { t, openPackage: () => {} })
+  await settle(view)
+  view.elements().find(element => element.type === 'button' && element.props?.['aria-label'] === '设置')?.props.onClick()
+  await settle(view)
+  const menu = view.elements().find(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-menu'))
+  eq(menu?.props?.['data-anchored'], 'fixed', '拿到布局信息时用内联 fixed 定位')
+  eq(menu?.props?.['data-placement'], 'bottom', '视口下方放得下 → placement=bottom')
+  eq(menu?.props?.style, { position: 'fixed', left: '100px', top: '604px' }, '内联坐标 = 按钮下方 6px（left=100 / top=598+6）')
+  ok(descendantsOf(menu).length >= 2, '内联定位时菜单内容照常渲染', descendantsOf(menu).length)
+  resetElementRect()
+  eq(loaded.state.consoleErrors.length, 0, '内联 fixed 兑底没有 console.error', loaded.state.consoleErrors)
+}
+section('更新全部 / 更新已选：同一 apply 载荷；底部批量栏已移除')
+{
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+
+  /**
+   * 渲染一次，按 `trigger` 走完确认流程，返回 apply 请求体。
+   * @param {(context: {view: object, bridge: object}) => Promise<object|undefined>} trigger - 交互步骤。
+   * @returns {Promise<{body: object|undefined, view: object, bridge: object}>} 结果。
+   */
+  const runApply = async (trigger) => {
+    const ctx = makePluginContext(loaded.state)
+    loaded.exports.apply(ctx)
+    const bridge = makeBridge({ candidates: CANDIDATES })
+    loaded.state.responses = (url, init) => bridge(url, init)
+    const view = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+    await settle(view)
+    const body = await trigger({ view, bridge })
+    return { body, view, bridge }
+  }
+
+  // A：「更新全部」。
+  const a = await runApply(async ({ view, bridge }) => {
+    const button = findClickable(view, text => text.trim() === '更新全部')
+    ok(button !== null && button.props?.disabled !== true, '有可安装项时「更新全部」可用', button?.props?.disabled)
+    button?.props.onClick()
+    await settle(view)
+    ok(view.texts().join(' | ').includes('确认更新'), '「更新全部」打开确认框', view.texts().slice(-14))
+    findClickable(view, text => text.trim() === '开始更新')?.props.onClick()
+    await settle(view)
+    return bridge.calls.find(call => call.url === `${API}/updates/apply`)?.body
+  })
+  ok(a.body !== undefined, '「更新全部」确认后 POST /updates/apply', a.view.texts().slice(-14))
+
+  // B：无选中时禁用；选中一行后只发这一行。
+  const b = await runApply(async ({ view, bridge }) => {
+    const button = findClickable(view, text => text.trim() === '更新已选')
+    ok(button !== null, '头部有「更新已选」按钮')
+    eq(button?.props?.disabled, true, '无选中时「更新已选」禁用')
+    findInputByLabel(view, 'demo-plugin-a')?.props.onChange({ target: { checked: true }, currentTarget: { checked: true } })
+    await settle(view)
+    eq(findClickable(view, text => text.trim() === '更新已选')?.props?.disabled, false, '选中一项后「更新已选」可用')
+    findClickable(view, text => text.trim() === '更新已选')?.props.onClick()
+    await settle(view)
+    ok(view.texts().join(' | ').includes('确认更新'), '「更新已选」打开确认框', view.texts().slice(-14))
+    findClickable(view, text => text.trim() === '开始更新')?.props.onClick()
+    await settle(view)
+    return bridge.calls.find(call => call.url === `${API}/updates/apply`)?.body
+  })
+  eq((b.body?.items ?? []).map(item => item.name), ['demo-plugin-a'], '「更新已选」只发选中的那一项')
+
+  // C：全选后「更新已选」= 原批量更新（与「更新全部」同载荷）。
+  const c = await runApply(async ({ view, bridge }) => {
+    const selectAll = findCheckable(view)
+    ok(selectAll !== null, '统计条有全选勾选框')
+    const handler = typeof selectAll?.props?.onChange === 'function' ? selectAll.props.onChange : selectAll?.props?.onClick
+    handler?.({ target: { checked: true }, currentTarget: { checked: true } })
+    await settle(view)
+    findClickable(view, text => text.trim() === '更新已选')?.props.onClick()
+    await settle(view)
+    findClickable(view, text => text.trim() === '开始更新')?.props.onClick()
+    await settle(view)
+    return bridge.calls.find(call => call.url === `${API}/updates/apply`)?.body
+  })
+  eq(c.body?.items, a.body?.items, '全选后「更新已选」的 apply 载荷与「更新全部」完全一致')
+  const names = (a.body?.items ?? []).map(item => item.name)
+  ok(names.includes('demo-plugin-a') && names.includes('demo-plugin-b'), 'apply 含 demo-plugin-a 与 demo-plugin-b', names)
+  ok(!names.includes('demo-plugin-c'), '不兼容的 demo-plugin-c 不进「更新全部 / 更新已选」', names)
+  ok((a.body?.items ?? []).every(item => Object.keys(item).every(key => ['name', 'spec', 'commit'].includes(key))), 'apply items 只带 name/spec/commit', a.body?.items)
+  ok(a.body?.requestId === undefined, 'apply 请求体不带 requestId（Host 契约不接这个参数）', a.body)
+  const gitItem = (a.body?.items ?? []).find(item => item.name === 'demo-plugin-b')
+  ok(typeof gitItem?.spec === 'string' && gitItem.spec.includes('#'), 'git 项带上索引里的固定 spec', gitItem)
+  eq(loaded.state.consoleErrors.length, 0, '更新交互没有 console.error', loaded.state.consoleErrors)
 }
 
 section('新行 UI：插件名即详情入口 / 无详情按钮 / 无展开原因 / 不显示 requirements')
@@ -1139,7 +1714,7 @@ section('无法检查：主状态徽标 title 带具体原因（zh/en）')
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
   const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
-  const bridge = makeBridge({ candidates })
+  const bridge = makeBridge({ candidates, settings: { updatesShowFailed: true } })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
   const view = render(tab.component, { t, openPackage: () => {} })
@@ -1423,7 +1998,7 @@ section('回归：检查失败 / 无法检查 不被「不兼容」掩盖')
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
   const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
-  const bridge = makeBridge({ candidates })
+  const bridge = makeBridge({ candidates, settings: { updatesShowFailed: true } })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
   const view = render(tab.component, { t, openPackage: () => {} })

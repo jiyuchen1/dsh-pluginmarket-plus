@@ -445,7 +445,7 @@ async function boot(options = {}) {
   const configValues = {
     sources: [], autoRefresh: false, refreshIntervalHours: 4, managePluginMarket: false,
     fetchTimeoutMs: 5000, maxBytes: 1024 * 1024, retries: 0, cacheDir: '.pluginmarket-plus',
-    updatesIncludeDisabled: false, updatesIncludePrerelease: false,
+    updatesIncludeDisabled: false, updatesIncludePrerelease: false, updatesShowFailed: false,
     ...options.config,
   }
   /** 每个字段都是一个 volatile 引用（`{ get() }`）。 */
@@ -758,10 +758,32 @@ eq(app.configValues.updatesIncludeDisabled, true, '设置真的写进了配置')
 const ignored = await app.call('/api/pluginmarket-plus/settings', { method: 'POST', body: { updatesIncludeDisabled: 'yes' } })
 eq(ignored.body.status.config.updatesIncludeDisabled, true, '非布尔值被忽略（保持原值）')
 
+// updatesShowFailed：写入、回读、与另两个开关同级且互不影响、非布尔值忽略。
+const showFailedWrite = await app.call('/api/pluginmarket-plus/settings', { method: 'POST', body: { updatesShowFailed: true } })
+eq(showFailedWrite.status, 200, 'POST /settings 接受 updatesShowFailed')
+eq(showFailedWrite.body.status.config.updatesShowFailed, true, '响应回读 updatesShowFailed')
+eq(app.configValues.updatesShowFailed, true, 'updatesShowFailed 真的写进了配置')
+eq(showFailedWrite.body.status.config.updatesIncludeDisabled, true, '写 showFailed 不影响 includeDisabled')
+eq(showFailedWrite.body.status.config.updatesIncludePrerelease, true, '写 showFailed 不影响 includePrerelease')
+const updatesConfig = await app.call('/api/pluginmarket-plus/updates')
+eq(updatesConfig.body.config.showFailed, true, 'GET /updates 的 config.showFailed=true')
+eq(updatesConfig.body.config.includeDisabled, true, 'GET /updates 三个开关同级返回（includeDisabled）')
+eq(updatesConfig.body.config.includePrerelease, true, 'GET /updates 三个开关同级返回（includePrerelease）')
+const ignoredShowFailed = await app.call('/api/pluginmarket-plus/settings', { method: 'POST', body: { updatesShowFailed: 'yes' } })
+eq(ignoredShowFailed.body.status.config.updatesShowFailed, true, 'updatesShowFailed 非布尔值被忽略（保持原值）')
+
 const freshApp = await boot({ pluginManager: manager })
 const freshStatus = await freshApp.call('/api/pluginmarket-plus/status')
 eq(freshStatus.body.config.updatesIncludeDisabled, false, '两个开关默认关闭')
 eq(freshStatus.body.config.updatesIncludePrerelease, false, '两个开关默认关闭')
+eq(freshStatus.body.config.updatesShowFailed, false, 'updatesShowFailed 默认关闭')
+eq((await freshApp.call('/api/pluginmarket-plus/updates')).body.config.showFailed, false, 'GET /updates 的 showFailed 默认 false')
+// 只打开 showFailed：另两个开关不受影响。
+const isolatedFailed = await freshApp.call('/api/pluginmarket-plus/settings', { method: 'POST', body: { updatesShowFailed: true } })
+eq(isolatedFailed.body.status.config.updatesShowFailed, true, '只改 showFailed 时它变 true')
+eq(isolatedFailed.body.status.config.updatesIncludeDisabled, false, '另两个开关不受影响（includeDisabled）')
+eq(isolatedFailed.body.status.config.updatesIncludePrerelease, false, '另两个开关不受影响（includePrerelease）')
+eq((await freshApp.call('/api/pluginmarket-plus/updates')).body.config.showFailed, true, 'GET /updates 的 config.showFailed 跟着变 true')
 
 // 配置写不进去时（没有 Settings 条目）开关仍在本次进程内生效，并如实报告 saved:false。
 const appFallback = await boot({ pluginManager: manager, breakSettings: true })
@@ -770,6 +792,11 @@ eq(fallbackWrite.status, 200, '写配置失败也不报 500')
 eq(fallbackWrite.body.saved, false, '如实报告没有落盘')
 eq(fallbackWrite.body.status.config.updatesIncludePrerelease, true, '开关在进程内仍然生效')
 eq(appFallback.configValues.updatesIncludePrerelease, false, '确实没有写进配置')
+const fallbackFailed = await appFallback.call('/api/pluginmarket-plus/settings', { method: 'POST', body: { updatesShowFailed: true } })
+eq(fallbackFailed.body.saved, false, 'updatesShowFailed 写不进配置时同样如实报告')
+eq(fallbackFailed.body.status.config.updatesShowFailed, true, 'updatesShowFailed 在进程内生效')
+eq((await appFallback.call('/api/pluginmarket-plus/updates')).body.config.showFailed, true, 'updatesOverrides 覆盖了 showFailed')
+eq(appFallback.configValues.updatesShowFailed, false, 'updatesShowFailed 确实没有写进配置')
 
 // 渲染开关真的改变候选范围
 const app4 = await boot({ pluginManager: makeManager([bundle({ name: 'dis', update: 'registry', source: 'dis@1.0.0', enabled: false })]), config: { updatesIncludeDisabled: true } })
@@ -898,6 +925,8 @@ ok(!/@deepseek-ai\/dsh-client/u.test(indexSource + updatesSource + storeSource),
 ok(!/\bsetInterval\s*\(/u.test(indexSource), '没有新增 setInterval（不做轮询/自动更新）')
 ok(/^  updatesIncludeDisabled: z\.boolean\(\)\.default\(false\)\.volatile\(\),$/mu.test(indexSource), '开关 updatesIncludeDisabled 是 volatile、默认 false')
 ok(/^  updatesIncludePrerelease: z\.boolean\(\)\.default\(false\)\.volatile\(\),$/mu.test(indexSource), '开关 updatesIncludePrerelease 是 volatile、默认 false')
+ok(/^  updatesShowFailed: z\.boolean\(\)\.default\(false\)\.volatile\(\),$/mu.test(indexSource), '开关 updatesShowFailed 是 volatile、默认 false')
+ok(/for \(const key of \['updatesIncludeDisabled', 'updatesIncludePrerelease', 'updatesShowFailed'\]\)/u.test(indexSource), 'updatesOverrides 覆盖逻辑包含三个开关')
 ok(/pluginManager\.updateBundle\(item\.name, item\.version, options\)/u.test(indexSource), '执行更新只走 updateBundle')
 ok(/createRequire|detectRuntimeVersion/u.test(indexSource), '版本豁免能自己解析 DSH 版本')
 for (const file of [[indexPath, indexSource], [updatesPath, updatesSource], [storePath, storeSource]]) {
