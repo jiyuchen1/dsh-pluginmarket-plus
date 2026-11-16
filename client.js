@@ -33,6 +33,8 @@ window.__ModuleLoader__.load({
     const CACHE_ORDER = 10
     /** 进度轮询间隔（毫秒）。 */
     const POLL_MS = 700
+    /** 连续这么多次读不到进度就认定 Host 已退出/正在重启。 */
+    const LOST_THRESHOLD = 3
 
     const I18N = {
       zh: {
@@ -173,6 +175,18 @@ window.__ModuleLoader__.load({
         updatesStartFailed: '更新未能开始：{error}',
         updatesAnotherRunning: '另一个更新正在进行，请稍后再试。',
         updatesStateLost: '进度状态读取失败（可重试）。',
+        updatesHostLost: 'DSH 已退出或正在重启，请重新启动后继续。',
+        updatesRestartNotice: '{n} 项已更新，重启 DSH 后生效。',
+        updatesInterruptedTitle: '上次更新中断',
+        updatesInterruptedLead: '{n} 项没装完。可以重新安装，或忽略这次记录。',
+        updatesRecover: '重新安装',
+        updatesRecovering: '正在重新安装…',
+        updatesIgnore: '忽略',
+        updatesRecovered: '已重新安装 {n} 项。',
+        updatesRecoverPartial: '已重新安装 {ok} 项，{failed} 项失败（见下方原因）。',
+        updatesRecoverItemFailed: '重新安装失败：{error}',
+        updatesRecoverFailed: '恢复失败：{error}',
+        updatesInterruptedCleared: '已忽略上次中断的更新记录。',
         updatesRecheck: '重新检查',
         stagePending: '等待',
         stageChecking: '检查',
@@ -323,6 +337,18 @@ window.__ModuleLoader__.load({
         updatesStartFailed: 'The update did not start: {error}',
         updatesAnotherRunning: 'Another update is already running; try again shortly.',
         updatesStateLost: 'Could not read progress state (retryable).',
+        updatesHostLost: 'DSH exited or is restarting. Restart it, then continue here.',
+        updatesRestartNotice: '{n} updated. Restart DSH to apply.',
+        updatesInterruptedTitle: 'Interrupted last time',
+        updatesInterruptedLead: '{n} did not finish installing. Reinstall them, or ignore this record.',
+        updatesRecover: 'Reinstall',
+        updatesRecovering: 'Reinstalling…',
+        updatesIgnore: 'Ignore',
+        updatesRecovered: 'Reinstalled {n}.',
+        updatesRecoverPartial: 'Reinstalled {ok}, {failed} failed (see reasons below).',
+        updatesRecoverItemFailed: 'Reinstall failed: {error}',
+        updatesRecoverFailed: 'Recovery failed: {error}',
+        updatesInterruptedCleared: 'Ignored the interrupted update record.',
         updatesRecheck: 'Check again',
         stagePending: 'Queued',
         stageChecking: 'Checking',
@@ -408,6 +434,12 @@ window.__ModuleLoader__.load({
       '.pmu-summaryText{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
       '.pmu-summaryActions{margin-left:auto;display:flex;align-items:center;gap:8px}',
       '.pmu-summaryTime{margin-left:auto;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}',
+      // 「上次更新中断」区块：列表上方，逐项一行。
+      '.pmu-interrupted{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1)}',
+      '.pmu-interruptedHead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}',
+      '.pmu-interruptedRow{display:grid;grid-template-columns:minmax(0,1fr) 148px 56px minmax(0,auto) minmax(112px,auto);column-gap:10px;align-items:center;min-width:0;padding-top:8px;border-top:0.5px solid var(--dsw-alias-border-l2)}',
+      '.pmu-interruptedName{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:20px;font-weight:600}',
+      '@media (max-width:720px){.pmu-interruptedRow{grid-template-columns:minmax(0,1fr) 120px 48px minmax(0,auto) minmax(96px,auto);column-gap:6px}}',
       '.pmu-list{display:flex;flex-direction:column;gap:6px}',
       '.pmu-row{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1)}',
       '.pmu-row[data-tone="bad"]{border-color:color-mix(in srgb, var(--dsw-alias-state-error-primary) 40%, transparent)}',
@@ -921,6 +953,10 @@ window.__ModuleLoader__.load({
         menuPlacement,
         readSettings,
         mergeSettings,
+        nextPollFailure,
+        readInterrupted,
+        readRecoverResults,
+        lostThreshold: LOST_THRESHOLD,
       }
     }
 
@@ -1335,6 +1371,59 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 轮询失败的累加判定：连续失败达到阈值即认为 Host 失联（DSH 退出或正在重启）。
+     * @param {number} previous - 之前的连续失败次数。
+     * @returns {{count: number, lost: boolean}} 新的计数与是否失联。
+     */
+    function nextPollFailure(previous) {
+      const count = (Number.isFinite(previous) ? Math.max(0, Math.floor(previous)) : 0) + 1
+      return { count, lost: count >= LOST_THRESHOLD }
+    }
+
+    /**
+     * 归一 GET /updates 的 `interrupted`（Host：`{name,current,target,kind,requestId,phase,startedAt,spec?}`）。
+     * @param {unknown} value - 响应里的 interrupted。
+     * @returns {Array<{name: string, current: string, target: string, kind: string, spec: string, phase: string}>} 记录。
+     */
+    function readInterrupted(value) {
+      return list(value)
+        .map((entry) => {
+          const raw = rec(entry)
+          const name = text(raw.name) || text(raw.package)
+          if (name === '') return null
+          return {
+            name,
+            current: text(raw.current) || text(raw.from),
+            target: text(raw.target) || text(raw.latest) || text(raw.version),
+            kind: text(raw.kind) === 'git' ? 'git' : 'npm',
+            spec: text(raw.spec),
+            phase: text(raw.phase) || text(raw.stage),
+          }
+        })
+        .filter(Boolean)
+    }
+
+    /**
+     * 把 recover 的 `results` 合并成「包名 → 失败原因」（成功项没有原因）。
+     * @param {unknown} results - 响应里的 results。
+     * @returns {{failed: Map<string, string>, ok: string[]}} 结果。
+     */
+    function readRecoverResults(results) {
+      /** @type {Map<string, string>} */
+      const failed = new Map()
+      /** @type {string[]} */
+      const ok = []
+      for (const entry of list(results)) {
+        const raw = rec(entry)
+        const name = text(raw.name)
+        if (name === '') continue
+        if (raw.ok === true) ok.push(name)
+        else failed.set(name, text(raw.error) || text(raw.message) || 'install-failed')
+      }
+      return { failed, ok }
+    }
+
+    /**
      * 取进度项的错误正文（Host 的 `error` 是字符串；对象时取 diagnostic/message/code）。
      * 取消项被 Host 写入的 `error:'cancelled'` 不是错误正文，返回空串。
      * @param {object} raw - 队列项。
@@ -1598,7 +1687,7 @@ window.__ModuleLoader__.load({
      * @param {object} props - 组件属性。
      * @returns {object} React 元素。
      */
-    function UpdatesProgress({ items, status, summary, running, cancelling, openLogs, t, onToggleLog, onCancel, onClose }) {
+    function UpdatesProgress({ items, status, summary, running, cancelling, openLogs, lost, t, onToggleLog, onCancel, onClose }) {
       const ready = items.length > 0 && items.every(progressTerminal)
       const finished = status !== 'running' && (status === 'done' || (ready && running !== true))
       const counts = readSummary(summary) ?? {
@@ -1614,6 +1703,10 @@ window.__ModuleLoader__.load({
       const current = items.find(item => !progressTerminal(item))
       const currentIndex = items.length === 0 || current === undefined ? items.length : items.indexOf(current) + 1
       return h('div', { className: 'pmu-root' },
+        // Host 失联：比「读取失败（可重试）」更明确，且此时已停止轮询。
+        lost === true && h('p', { className: 'pmu-notice pmu-lost', 'data-tone': 'warn' }, t('updatesHostLost')),
+        // 批量结束且有需要重启的项：醒目提示，但不自动重启、不杀进程。
+        finished && restart > 0 && h('p', { className: 'pmu-notice pmu-restartNotice', 'data-tone': 'warn' }, t('updatesRestartNotice', { n: restart })),
         h('div', { className: 'pmu-progressHead' },
           h('h3', { className: 'pmu-title' }, t('updatesProgressTitle')),
           h('span', { className: 'pmu-summaryText' }, t('updatesProgressOf', { index: currentIndex, total: items.length })),
@@ -1690,11 +1783,16 @@ window.__ModuleLoader__.load({
       const [confirmSecond, setConfirmSecond] = React.useState(null)
       const [progress, setProgress] = React.useState(null)
       const [cancelling, setCancelling] = React.useState(false)
+      const [hostLost, setHostLost] = React.useState(false)
+      const [interrupted, setInterrupted] = React.useState([])
+      const [recovering, setRecovering] = React.useState('')
+      const [recoverErrors, setRecoverErrors] = React.useState({})
       const [openLogs, setOpenLogs] = React.useState({})
       const [settingsOpen, setSettingsOpen] = React.useState(false)
       const [menuPos, setMenuPos] = React.useState(null)
       const alive = React.useRef(true)
       const pollRef = React.useRef(null)
+      const pollFailuresRef = React.useRef(0)
       const requestRef = React.useRef('')
       const selectAllRef = React.useRef(null)
       const settingsRef = React.useRef(null)
@@ -1738,6 +1836,7 @@ window.__ModuleLoader__.load({
           const incomingSettings = readSettings(body)
           if (incomingSettings.known) setSettings(previous => mergeSettings(previous, incomingSettings))
           setCheckedAt(body.checkedAt === undefined || body.checkedAt === null ? null : num(body.checkedAt, Date.now()))
+          setInterrupted(readInterrupted(body.interrupted))
           setLoadError('')
           setLoaded(true)
           if (body.running === true && skipResume !== true) {
@@ -1815,6 +1914,8 @@ window.__ModuleLoader__.load({
         try {
           const payload = await getJson(`${UPDATES_API}/state`)
           if (!alive.current) return
+          pollFailuresRef.current = 0
+          setHostLost(false)
           const body = rec(payload)
           const current = readProgress(body)
           const items = mergeStages(current.items)
@@ -1831,14 +1932,25 @@ window.__ModuleLoader__.load({
           }
         } catch {
           if (!alive.current) return
-          stopPolling()
-          setCancelling(false)
+          // 单次失败只提示可重试；连续 3 次失败说明 Host 已经不在（DSH 退出/重启中），
+          // 这时停止轮询并给出「重新启动后继续」，而不是反复刷「读取失败（可重试）」。
+          const verdict = nextPollFailure(pollFailuresRef.current)
+          pollFailuresRef.current = verdict.count
+          if (verdict.lost) {
+            stopPolling()
+            setCancelling(false)
+            setHostLost(true)
+            setNotice(null)
+            return
+          }
           setNotice({ tone: 'error', text: t('updatesStateLost') })
         }
       }, [finish, mergeStages, stopPolling, t])
 
       const startPolling = React.useCallback(() => {
         stopPolling()
+        pollFailuresRef.current = 0
+        setHostLost(false)
         pollRef.current = setInterval(() => { void poll() }, POLL_MS)
         void poll()
       }, [poll, stopPolling])
@@ -1880,6 +1992,9 @@ window.__ModuleLoader__.load({
           const names = rows.map(row => row.name)
           const payload = await postJson('/updates/check', names.length > 0 ? { names } : {})
           if (!alive.current) return
+          // 手动检查成功 = 连接已恢复：清掉失联提示与计数。
+          pollFailuresRef.current = 0
+          setHostLost(false)
           const body = rec(payload)
           if (!applyCandidates(body)) await load()
           if (!alive.current) return
@@ -1894,6 +2009,56 @@ window.__ModuleLoader__.load({
         } finally {
           if (alive.current) setBusy('')
         }
+      }
+
+      /**
+       * 重新安装中断的项（Host：POST /updates/recover）。
+       * @param {string} [only] - 只恢复该包；省略则整批。
+       * @returns {void}
+       */
+      const recoverInterrupted = (only) => {
+        setRecovering(only === undefined ? '*' : only)
+        setNotice(null)
+        const body = only === undefined ? {} : { items: [{ name: only }] }
+        void postJson('/updates/recover', body).then((payload) => {
+          if (!alive.current) return
+          const result = readRecoverResults(rec(payload).results)
+          const remaining = readInterrupted(rec(payload).interrupted)
+          setInterrupted(remaining)
+          /** @type {Record<string, string>} */
+          const errors = {}
+          for (const [name, reason] of result.failed) errors[name] = reason
+          setRecoverErrors(errors)
+          if (result.failed.size === 0) {
+            setNotice({ tone: 'ok', text: t('updatesRecovered', { n: result.ok.length }) })
+          } else {
+            setNotice({ tone: 'error', text: t('updatesRecoverPartial', { ok: result.ok.length, failed: result.failed.size }) })
+          }
+          void load(true)
+        }).catch((failure) => {
+          if (alive.current) setNotice({ tone: 'error', text: t('updatesRecoverFailed', { error: String(failure?.message ?? failure) }) })
+        }).finally(() => {
+          if (alive.current) setRecovering('')
+        })
+      }
+
+      /**
+       * 忽略中断记录（Host：POST /updates/clear-interrupted）。
+       * @returns {void}
+       */
+      const ignoreInterrupted = () => {
+        setRecovering('ignore')
+        setNotice(null)
+        void postJson('/updates/clear-interrupted', {}).then(() => {
+          if (!alive.current) return
+          setInterrupted([])
+          setRecoverErrors({})
+          setNotice({ tone: 'ok', text: t('updatesInterruptedCleared') })
+        }).catch((failure) => {
+          if (alive.current) setNotice({ tone: 'error', text: t('updatesRecoverFailed', { error: String(failure?.message ?? failure) }) })
+        }).finally(() => {
+          if (alive.current) setRecovering('')
+        })
       }
 
       const startApply = async (items) => {
@@ -2157,6 +2322,34 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'pmp-btn', disabled: busy !== '' || selectedCount === 0, onClick: () => { openConfirm({ rows: selectedRows }) } }, t('updatesUpdateSelected'))),
 
         notice !== null && h('p', { className: 'pmu-notice', 'data-tone': notice.tone }, notice.text),
+
+        // 上次更新中断（Host 的 GET /updates.interrupted）：逐项重装或整批忽略。
+        interrupted.length > 0 && h('div', { className: 'pmu-interrupted', role: 'group', 'aria-label': t('updatesInterruptedTitle') },
+          h('div', { className: 'pmu-interruptedHead' },
+            h('h3', { className: 'pmu-title' }, t('updatesInterruptedTitle')),
+            h('span', { className: 'pmu-summaryText' }, t('updatesInterruptedLead', { n: interrupted.length })),
+            h('span', { className: 'pmu-summaryActions' },
+              h('button', {
+                type: 'button', className: 'pmp-btn pmp-btnPrimary',
+                disabled: recovering !== '' || busy !== '',
+                onClick: () => { recoverInterrupted() },
+              }, recovering === '*' ? t('updatesRecovering') : t('updatesRecover')),
+              h('button', {
+                type: 'button', className: 'pmp-btn',
+                disabled: recovering !== '' || busy !== '',
+                onClick: ignoreInterrupted,
+              }, t('updatesIgnore')))),
+          ...interrupted.map(item => h('div', { className: 'pmu-interruptedRow', key: item.name },
+            h('span', { className: 'pmu-interruptedName', title: item.name }, item.name),
+            h('span', { className: 'pmu-versions' }, `${item.current === '' ? t('updatesUnknownVersion') : item.current} → ${item.target === '' ? t('updatesUnknownVersion') : item.target}`),
+            h('span', { className: 'pmp-badge' }, item.kind === 'git' ? t('updatesKindGit') : t('updatesKindNpm')),
+            recoverErrors[item.name] !== undefined && h('span', { className: 'pmu-error' }, t('updatesRecoverItemFailed', { error: recoverErrors[item.name] })),
+            h('span', { className: 'pmu-summaryActions' },
+              h('button', {
+                type: 'button', className: 'pmp-btn',
+                disabled: recovering !== '' || busy !== '',
+                onClick: () => { recoverInterrupted(item.name) },
+              }, recovering === item.name ? t('updatesRecovering') : t('updatesRecover')))))),
         loadError !== '' && h('p', { className: 'pmu-error' }, t('updatesLoadFailed', { error: loadError })),
 
         progress !== null && h(UpdatesProgress, {
@@ -2166,6 +2359,7 @@ window.__ModuleLoader__.load({
           running: progress.running,
           cancelling,
           openLogs,
+          lost: hostLost,
           t,
           onToggleLog: toggleLog,
           onCancel: () => { void cancelCurrent() },

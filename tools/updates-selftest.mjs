@@ -10,7 +10,7 @@
  * @module dsh-pluginmarket-plus/tools/updates-selftest
  */
 
-import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { createRequire, registerHooks } from 'node:module'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
@@ -18,8 +18,8 @@ import { pathToFileURL, fileURLToPath } from 'node:url'
 import { CacheStore, sourceId } from '../lib/store.js'
 import {
   buildGitSpec, checkCandidate, checkCandidates, classifyBundle, collectCandidates, compareVersions,
-  createUpdateQueue, flattenUpdateOutcome, hasPluginManagement, isPrerelease, latestGitFromIndex,
-  normalizeIndexGitSource, parseGitSpec, parseVersion,
+  createUpdateQueue, flattenUpdateOutcome, hasPluginManagement, inflightRecord, isPrerelease, latestGitFromIndex,
+  normalizeIndexGitSource, normalizeInflight, parseGitSpec, parseVersion, recoverSpec, withoutInflight,
 } from '../lib/updates.js'
 
 /**
@@ -542,12 +542,15 @@ async function boot(options = {}) {
 
 /** 记录每个 `updateBundle` 调用，并按名字给出预设结果。 */
 function makeManager(bundlesList, outcomes = {}) {
-  const calls = { listVersions: [], updateBundle: [], cancelInstall: [], waitForInstall: [], exemptions: [] }
+  const calls = { listVersions: [], updateBundle: [], cancelInstall: [], waitForInstall: [], exemptions: [], installBundle: [] }
   /** 按包名覆盖 `listVersions`：函数直接调用，Error 原样抛出，其它值作为返回结果。 */
   const versionLists = {}
+  /** 按 spec 覆盖 `installBundle`：函数直接调用，其它值作为返回结果，Error 原样抛出。 */
+  const installOutcomes = {}
   return {
     calls,
     versionLists,
+    installOutcomes,
     listBundles: async () => bundlesList,
     listVersions: async (name) => {
       calls.listVersions.push(name)
@@ -561,6 +564,13 @@ function makeManager(bundlesList, outcomes = {}) {
       const outcome = outcomes[name]
       if (typeof outcome === 'function') return outcome(name, version, options)
       return outcome ?? { from: '1.0.0', to: version, step: 'install', result: { changed: true, application: 'applied', stage: 'install', target: `${name}@${version}` } }
+    },
+    installBundle: async (spec, options) => {
+      calls.installBundle.push({ spec, options })
+      const outcome = installOutcomes[spec]
+      if (typeof outcome === 'function') return outcome(spec, options)
+      if (outcome instanceof Error) throw outcome
+      return outcome ?? { changed: true, application: 'applied', stage: 'install', target: spec }
     },
     cancelInstall: async (requestId) => {
       calls.cancelInstall.push(requestId)
@@ -900,15 +910,200 @@ await eventApp.call('/api/pluginmarket-plus/updates/cancel', { method: 'POST', b
 await new Promise(resolve => setTimeout(resolve, 200))
 eq(manager.calls.cancelInstall.length >= 0, true, '取消路径可用')
 
+// ---------------------------------------------------------------------------
+// 8. 中断日志与恢复（updates-inflight.json）
+// ---------------------------------------------------------------------------
+section('中断日志与恢复')
+
+/** 中断日志文件路径。 */
+const inflightPathOf = profileDir => join(profileDir, '.pluginmarket-plus', 'updates-inflight.json')
+/** 读中断日志（文件不存在时返回 null）。 */
+const readInflightFile = profileDir => {
+  const target = inflightPathOf(profileDir)
+  if (!existsSync(target)) return null
+  return JSON.parse(readFileSync(target, 'utf8'))
+}
+/** 直接写一份中断日志（模拟上次进程被杀）。 */
+const seedInflight = (profileDir, items) => {
+  const dir = join(profileDir, '.pluginmarket-plus')
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(inflightPathOf(profileDir), JSON.stringify({ version: 1, items }, null, 2), 'utf8')
+}
+
+// 纯函数：记录归一 / 恢复 spec / 移除
+eq(inflightRecord({ name: 'a', current: '1.0.0', latest: '1.2.0', kind: 'npm', requestId: 'r1', startedAt: 7 }),
+  { name: 'a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'r1', phase: 'checking', startedAt: 7 },
+  'inflightRecord 归一 npm 记录（字段齐全）')
+eq(inflightRecord({ name: 'b', current: '1.0.0', latest: '2.0.0', kind: 'git', spec: `git+https://github.com/o/b.git#${COMMIT_NEW}`, requestId: 'r2', startedAt: 8 })?.spec,
+  `git+https://github.com/o/b.git#${COMMIT_NEW}`, 'inflightRecord 保留 Git 的固定 spec')
+eq(inflightRecord({ name: 'c', kind: 'npm', latest: '1.2.0' })?.phase, 'checking', 'inflightRecord 默认 phase=checking')
+eq(inflightRecord({ current: '1.0.0' }), null, 'inflightRecord 缺包名返回 null')
+eq(normalizeInflight([{ name: 'a', kind: 'npm', target: '1.0.0' }, { name: 'a', kind: 'npm', target: '2.0.0' }, null, { name: '' }]).map(record => record.target),
+  ['2.0.0'], 'normalizeInflight 去重（同名后者覆盖）并丢掉坏记录')
+eq(normalizeInflight({ items: [{ name: 'x', kind: 'npm', target: '1.0.0' }] }).length, 1, 'normalizeInflight 接受 {items}')
+eq(normalizeInflight('nope'), [], 'normalizeInflight 拒绝非法输入')
+eq(recoverSpec({ name: 'a', kind: 'npm', target: '1.2.0' }), 'a@1.2.0', 'npm 的恢复 spec 是 name@target')
+eq(recoverSpec({ name: 'b', kind: 'git', spec: 'git+x#abc' }), 'git+x#abc', 'git 的恢复 spec 用记录里的 spec')
+eq(recoverSpec({ name: 'c', kind: 'git' }), '', 'git 缺 spec 时返回空串')
+eq(recoverSpec({ name: 'd', kind: 'npm' }), 'd', 'npm 缺 target 时退回裸包名')
+eq(withoutInflight([{ name: 'a' }, { name: 'b' }], ['a']).map(record => record.name), ['b'], 'withoutInflight 按包名移除')
+
+// 无残留时 interrupted 为 []
+const inflightApp = await boot({ pluginManager: makeManager(selftestBundles) })
+const noLeftover = await inflightApp.call('/api/pluginmarket-plus/updates')
+eq(noLeftover.body.interrupted, [], '无残留时 GET /updates 的 interrupted 是 []')
+eq(noLeftover.body.candidates.length > 0, true, 'interrupted 不影响既有字段（candidates 仍在）')
+eq(readInflightFile(inflightApp.profileDir), null, '没有残留时不创建中断日志文件')
+
+// 更新队列：每项开始前写入、结束后移除；全部跑完且无残留时删除文件
+const midRunInflight = []
+const inflightManager = makeManager(selftestBundles, {
+  'demo-a': () => new Promise((resolve) => {
+    // 在这一项「正在跑」的时候观察中断日志。
+    midRunInflight.push(readInflightFile(appInflight.profileDir))
+    setTimeout(() => resolve({ from: '1.0.0', to: '1.2.0', step: 'install', result: { changed: true, application: 'applied', stage: 'install', target: 'demo-a@1.2.0' } }), 60)
+  }),
+})
+const appInflight = await boot({ pluginManager: inflightManager })
+await appInflight.call('/api/pluginmarket-plus/updates/check', { method: 'POST', body: {} })
+await appInflight.call('/api/pluginmarket-plus/updates/apply', { method: 'POST', body: { items: [{ name: 'demo-a' }] } })
+await new Promise(resolve => setTimeout(resolve, 250))
+const observedRecord = midRunInflight[0]?.items?.[0]
+eq(observedRecord?.name, 'demo-a', '队列跑某一项时中断日志里有该项')
+eq(observedRecord?.target, '1.2.0', '中断日志记录目标版本')
+eq(observedRecord?.kind, 'npm', '中断日志记录 kind=npm')
+ok(typeof observedRecord?.requestId === 'string' && observedRecord.requestId !== '', '中断日志记录 requestId')
+eq(observedRecord?.phase, 'checking', '中断日志记录阶段')
+ok(typeof observedRecord?.startedAt === 'number', '中断日志记录 startedAt')
+eq(Object.hasOwn(observedRecord ?? {}, 'spec'), false, 'npm 项不写 spec')
+eq(readInflightFile(appInflight.profileDir), null, '该项结束后从文件移除；文件空了就删掉')
+const leftoverDir = readdirSync(join(appInflight.profileDir, '.pluginmarket-plus'))
+eq(leftoverDir.filter(name => name.includes('.tmp-')), [], '原子写不留下临时文件')
+
+// 中断后 GET /updates 带 interrupted
+seedInflight(inflightApp.profileDir, [
+  { name: 'demo-a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'updates-0', phase: 'installing', startedAt: 111 },
+  { name: 'demo-b', current: '1.0.0', target: '2.0.0', kind: 'git', spec: `git+https://github.com/o/b.git#${COMMIT_NEW}`, requestId: 'updates-1', phase: 'removing', startedAt: 222 },
+])
+const withLeftover = await inflightApp.call('/api/pluginmarket-plus/updates')
+eq(withLeftover.body.interrupted.length, 2, '中断后 GET /updates 返回 2 条残留')
+eq(withLeftover.body.interrupted[0], {
+  name: 'demo-a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'updates-0', phase: 'installing', startedAt: 111,
+}, '残留记录字段完整（npm）')
+eq(withLeftover.body.interrupted[1].spec, `git+https://github.com/o/b.git#${COMMIT_NEW}`, '残留记录保留 Git spec')
+
+// recover：npm 用 name@target，git 用记录里的 spec
+const recoverManager = makeManager(selftestBundles)
+const appRecover = await boot({ pluginManager: recoverManager })
+seedInflight(appRecover.profileDir, [
+  { name: 'demo-a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'updates-0', phase: 'installing', startedAt: 111 },
+  { name: 'demo-b', current: '1.0.0', target: '2.0.0', kind: 'git', spec: `git+https://github.com/o/b.git#${COMMIT_NEW}`, requestId: 'updates-1', phase: 'removing', startedAt: 222 },
+])
+const recovered = await appRecover.call('/api/pluginmarket-plus/updates/recover', { method: 'POST', body: {} })
+eq(recovered.status, 200, 'POST /updates/recover 返回 200')
+eq(recovered.body.ok, true, '恢复成功时 ok=true')
+eq(recovered.body.results, [{ name: 'demo-a', ok: true }, { name: 'demo-b', ok: true }], '每项都有结果')
+eq(recoverManager.calls.installBundle.map(call => call.spec),
+  ['demo-a@1.2.0', `git+https://github.com/o/b.git#${COMMIT_NEW}`],
+  'npm 用 name@target、git 用记录里的固定 commit spec')
+eq(recovered.body.interrupted, [], '全部恢复成功后没有残留')
+eq(readInflightFile(appRecover.profileDir), null, '全部恢复成功且文件空了就删除文件')
+
+// recover：失败项保留并返回原因
+const failManager = makeManager(selftestBundles)
+failManager.installOutcomes['demo-a@1.2.0'] = { changed: false, application: 'failed', stage: 'install', target: 'demo-a@1.2.0', error: { code: 'incompatible-version', diagnostic: 'engines.dsh 不满足' } }
+failManager.installOutcomes['git+https://github.com/o/b.git#old'] = new Error('network down')
+const appFail = await boot({ pluginManager: failManager })
+seedInflight(appFail.profileDir, [
+  { name: 'demo-a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'r1', phase: 'installing', startedAt: 1 },
+  { name: 'demo-b', current: '1.0.0', target: '2.0.0', kind: 'git', spec: 'git+https://github.com/o/b.git#old', requestId: 'r2', phase: 'installing', startedAt: 2 },
+])
+const failedRecover = await appFail.call('/api/pluginmarket-plus/updates/recover', { method: 'POST', body: {} })
+eq(failedRecover.body.results[0], { name: 'demo-a', ok: false, error: 'engines.dsh 不满足' }, '安装失败项带 diagnostic')
+eq(failedRecover.body.results[1], { name: 'demo-b', ok: false, error: 'network down' }, '抛错项带错误消息')
+eq(failedRecover.body.interrupted.length, 2, '失败项全部保留在残留里')
+eq(readInflightFile(appFail.profileDir)?.items.length, 2, '失败项仍写在文件里')
+
+// recover：部分成功只摘掉成功的项
+const partialManager = makeManager(selftestBundles)
+partialManager.installOutcomes['demo-a@1.2.0'] = new Error('boom')
+const appPartial = await boot({ pluginManager: partialManager })
+seedInflight(appPartial.profileDir, [
+  { name: 'demo-a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'r1', phase: 'installing', startedAt: 1 },
+  { name: 'demo-b', current: '1.0.0', target: '2.0.0', kind: 'git', spec: `git+https://github.com/o/b.git#${COMMIT_NEW}`, requestId: 'r2', phase: 'installing', startedAt: 2 },
+])
+const partialRecover = await appPartial.call('/api/pluginmarket-plus/updates/recover', { method: 'POST', body: {} })
+eq(partialRecover.body.results.map(result => result.ok), [false, true], '部分成功：一个失败一个成功')
+eq(partialRecover.body.interrupted.map(record => record.name), ['demo-a'], '只保留失败的那一项')
+eq(readInflightFile(appPartial.profileDir)?.items.map(record => record.name), ['demo-a'], '文件里也只剩失败项')
+
+// recover：items 限定恢复哪些
+const pickManager = makeManager(selftestBundles)
+const appPick = await boot({ pluginManager: pickManager })
+seedInflight(appPick.profileDir, [
+  { name: 'demo-a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'r1', phase: 'installing', startedAt: 1 },
+  { name: 'demo-b', current: '1.0.0', target: '2.0.0', kind: 'git', spec: `git+https://github.com/o/b.git#${COMMIT_NEW}`, requestId: 'r2', phase: 'installing', startedAt: 2 },
+])
+const picked = await appPick.call('/api/pluginmarket-plus/updates/recover', { method: 'POST', body: { items: [{ name: 'demo-b' }] } })
+eq(pickManager.calls.installBundle.length, 1, 'items 限定时只恢复点名的项')
+eq(pickManager.calls.installBundle[0].spec, `git+https://github.com/o/b.git#${COMMIT_NEW}`, '点名恢复的是 Git 项')
+eq(picked.body.interrupted.map(record => record.name), ['demo-a'], '没点名的项留在残留里')
+const unknownPick = await appPick.call('/api/pluginmarket-plus/updates/recover', { method: 'POST', body: { items: [{ name: 'not-there' }] } })
+eq(unknownPick.status, 400, '点名的包不在残留里时 400')
+eq(unknownPick.body.error, 'unknown-items', '400 的原因是 unknown-items')
+
+// recover：无残留时直接返回空
+const emptyRecoverApp = await boot({ pluginManager: makeManager(selftestBundles) })
+const emptyRecover = await emptyRecoverApp.call('/api/pluginmarket-plus/updates/recover', { method: 'POST', body: {} })
+eq(emptyRecover.status, 200, '无残留时 recover 返回 200')
+eq(emptyRecover.body.results, [], '无残留时 results 为空')
+
+// recover 单飞：已有队列在跑时 409
+const busyManager = makeManager(selftestBundles, {
+  'demo-a': () => new Promise(resolve => setTimeout(() => resolve({ from: '1.0.0', to: '1.2.0', step: 'install', result: { changed: true, application: 'applied', stage: 'install', target: 'demo-a@1.2.0' } }), 150)),
+})
+const appBusy = await boot({ pluginManager: busyManager })
+seedInflight(appBusy.profileDir, [{ name: 'demo-b', current: '1.0.0', target: '2.0.0', kind: 'git', spec: `git+https://github.com/o/b.git#${COMMIT_NEW}`, requestId: 'r1', phase: 'installing', startedAt: 1 }])
+await appBusy.call('/api/pluginmarket-plus/updates/check', { method: 'POST', body: {} })
+await appBusy.call('/api/pluginmarket-plus/updates/apply', { method: 'POST', body: { items: [{ name: 'demo-a' }] } })
+const busyRecover = await appBusy.call('/api/pluginmarket-plus/updates/recover', { method: 'POST', body: {} })
+eq(busyRecover.status, 409, '已有队列在跑时 recover 返回 409')
+eq(busyRecover.body.error, 'update-running', '409 的原因是 update-running')
+eq(busyManager.calls.installBundle.length, 0, '单飞期间不调用 installBundle')
+await appBusy.call('/api/pluginmarket-plus/updates/cancel', { method: 'POST', body: {} })
+await new Promise(resolve => setTimeout(resolve, 250))
+
+// recover 不写 checkCache、不自动检查
+const noCheckManager = makeManager(selftestBundles)
+const appNoCheck = await boot({ pluginManager: noCheckManager })
+seedInflight(appNoCheck.profileDir, [{ name: 'demo-a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'r1', phase: 'installing', startedAt: 1 }])
+await appNoCheck.call('/api/pluginmarket-plus/updates/recover', { method: 'POST', body: {} })
+eq(noCheckManager.calls.listVersions, [], 'recover 不调用 listVersions（不自动检查）')
+eq(noCheckManager.calls.updateBundle, [], 'recover 不调用 updateBundle')
+eq((await appNoCheck.call('/api/pluginmarket-plus/updates')).body.candidates.find(candidate => candidate.name === 'demo-a')?.state, 'unknown', 'recover 不写 checkCache（候选仍是 unknown）')
+
+// clear-interrupted
+const clearApp = await boot({ pluginManager: makeManager(selftestBundles) })
+seedInflight(clearApp.profileDir, [{ name: 'demo-a', current: '1.0.0', target: '1.2.0', kind: 'npm', requestId: 'r1', phase: 'installing', startedAt: 1 }])
+const cleared = await clearApp.call('/api/pluginmarket-plus/updates/clear-interrupted', { method: 'POST', body: {} })
+eq(cleared.status, 200, 'POST /updates/clear-interrupted 返回 200')
+eq(cleared.body.ok, true, 'clear 成功')
+eq(cleared.body.cleared.length, 1, '返回被清掉的记录')
+eq(cleared.body.cleared[0].name, 'demo-a', '被清掉的记录内容正确')
+eq(readInflightFile(clearApp.profileDir), null, '清空后文件被删除')
+eq((await clearApp.call('/api/pluginmarket-plus/updates')).body.interrupted, [], '清空后 GET /updates 的 interrupted 是 []')
+const clearAgain = await clearApp.call('/api/pluginmarket-plus/updates/clear-interrupted', { method: 'POST', body: {} })
+eq(clearAgain.body.cleared, [], '再次 clear 时 cleared 为空')
+
 // ctx.effect 释放
 const disposeApp = await boot({ pluginManager: makeManager(selftestBundles) })
 const routesBefore = disposeApp.routes.size
-eq(routesBefore, 12, '注册了 2 个公开路由 + 10 个 owner 桥接路由')
+eq(routesBefore, 14, '注册了 2 个公开路由 + 12 个 owner 桥接路由')
 disposeApp.dispose()
 eq(disposeApp.routes.size < routesBefore, true, 'ctx.effect 释放时路由被注销')
 
 // 清理临时目录
-for (const app_ of [app, app2, app3, app4, app5, app6, app7, appEmpty, appThrow, appRestart, appSlow, eventApp, disposeApp, freshApp]) {
+for (const app_ of [app, app2, app3, app4, app5, app6, app7, appEmpty, appThrow, appRestart, appSlow, eventApp, inflightApp, appInflight, appRecover, appFail, appPartial, appPick, appBusy, appNoCheck, clearApp, disposeApp, freshApp]) {
   if (existsSync(app_.profileDir)) rmSync(app_.profileDir, { recursive: true, force: true })
 }
 

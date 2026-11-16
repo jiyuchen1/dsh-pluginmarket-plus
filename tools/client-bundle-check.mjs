@@ -730,6 +730,8 @@ function makeBridge(options = {}) {
   const settings = { updatesIncludeDisabled: false, updatesIncludePrerelease: false, updatesShowFailed: false, ...(options.settings ?? {}) }
   const calls = []
   let stateIndex = 0
+  /** 还要失败几次 GET /updates/state（模拟 Host 退出）。 */
+  let stateFailures = options.stateFailures ?? 0
   const impl = async (url, init = {}) => {
     const method = String(init?.method ?? 'GET').toUpperCase()
     const body = init?.body === undefined || init.body === null ? undefined : JSON.parse(String(init.body))
@@ -743,6 +745,7 @@ function makeBridge(options = {}) {
     if (url === `${API}/updates` && method === 'GET') {
       // updatesDelayMs 用于拉长「POST 已处理、GET 还没回来」的窗口，让中间态可被采样捕捉。
       if (typeof options.updatesDelayMs === 'number' && options.updatesDelayMs > 0) await sleep(options.updatesDelayMs)
+      const interrupted = typeof options.interrupted === 'function' ? options.interrupted() : (options.interrupted ?? [])
       return json({
         ok: true,
         candidates: options.candidates ?? [],
@@ -751,6 +754,7 @@ function makeBridge(options = {}) {
         // `updatesConfig` 可显式覆盖（例如给 {} 验证「响应没说」时不得覆盖本地状态）。
         config: options.updatesConfig === undefined ? { ...settings } : options.updatesConfig,
         running: options.running === true,
+        interrupted,
       })
     }
     if (url === `${API}/settings` && method === 'POST') {
@@ -767,10 +771,34 @@ function makeBridge(options = {}) {
       return json({ ok: true, started: true, requestIds: items.map((_, index) => `req-${index + 1}`), items })
     }
     if (url === `${API}/updates/state`) {
+      // stateFailures > 0 时先失败这么多次（模拟 Host 退出），之后恢复正常。
+      if (stateFailures > 0) {
+        stateFailures -= 1
+        throw new Error('fetch failed')
+      }
       const sequence = options.stateSequence ?? []
       const payload = sequence.length === 0 ? { ok: true, running: false, stopped: false, finished: false, summary: null, active: null, activeRequestId: null, items: [], logs: [] } : sequence[Math.min(stateIndex, sequence.length - 1)]
       stateIndex += 1
       return json(payload)
+    }
+    if (url === `${API}/updates/recover`) {
+      const items = Array.isArray(body?.items) ? body.items : []
+      const all = typeof options.interrupted === 'function' ? options.interrupted() : (options.interrupted ?? [])
+      const requested = items.length === 0 ? all : items
+      const results = requested.map((item) => {
+        const outcome = options.recoverOutcomes?.[item.name]
+        if (outcome === undefined) return { name: item.name, ok: true }
+        return outcome.ok === true ? { name: item.name, ok: true } : { name: item.name, ok: false, error: outcome.error }
+      })
+      // 只有「被点名且成功」的项从残留里摘掉；未点名的与失败的都保留。
+      const recovered = new Set(results.filter(result => result.ok === true).map(result => result.name))
+      const remaining = all.filter(record => !recovered.has(record.name))
+      if (typeof options.onRecover === 'function') options.onRecover(remaining)
+      return json({ ok: true, results, interrupted: remaining })
+    }
+    if (url === `${API}/updates/clear-interrupted`) {
+      if (typeof options.onRecover === 'function') options.onRecover([])
+      return json({ ok: true, cleared: typeof options.interrupted === 'function' ? options.interrupted() : (options.interrupted ?? []), interrupted: [] })
     }
     if (url === `${API}/updates/cancel`) return json({ ok: true, cancelled: 'cancelled', state: { running: false, items: [] } })
     if (url === `${API}/updates/exempt`) return json({ ok: true, runtimeVersion: '0.3.0' })
@@ -2170,6 +2198,214 @@ section('已废弃：字符串原因是真实契约，界面只用徽标（解�
   ok(!/已不再维护/u.test(view.texts().join(' | ')), '页面不显示废弃原因文本（解释区已移除）', view.texts().slice(0, 500))
   eq(findClickable(view, text => /展开|收起/u.test(text)), null, '已废弃行没有展开入口')
   eq(loaded.state.consoleErrors.length, 0, '已废弃渲染没有 console.error', loaded.state.consoleErrors)
+}
+
+
+section('失联提示：连续 3 次轮询失败后停止并提示重启，恢复后清除')
+{
+  const info = loaded.exports.inspectable()
+  eq(info.lostThreshold, 3, 'inspectable 暴露失联阈值 3')
+  eq(typeof info.nextPollFailure, 'function', 'inspectable 暴露 nextPollFailure（纯函数）')
+  // 纯函数复算：1→2→3 才判定失联。
+  if (typeof info.nextPollFailure === 'function') {
+    eq(info.nextPollFailure(0), { count: 1, lost: false }, '第 1 次失败：未失联')
+    eq(info.nextPollFailure(1), { count: 2, lost: false }, '第 2 次失败：未失联')
+    eq(info.nextPollFailure(2), { count: 3, lost: true }, '第 3 次失败：判定失联')
+    eq(info.nextPollFailure(3).lost, true, '继续失败仍是失联')
+    eq(info.nextPollFailure(undefined), { count: 1, lost: false }, '缺省计数按 0 起算')
+  }
+
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
+  const runningState = {
+    ok: true,
+    running: true,
+    stopped: false,
+    finished: false,
+    summary: { total: 1, success: 0, failed: 0, cancelled: 0, pending: 1 },
+    active: 'demo-plugin-a',
+    activeRequestId: 'req-1',
+    items: [{ name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'npm', requestId: 'req-1', stage: 'installing', success: false, failed: false, restartRequired: false, cancelled: false, error: null, restore: null }],
+    logs: [],
+  }
+  // 只推进本用例新建的定时器：先清空历史 section 留下的登记，再渲染。
+  loaded.state.intervals.length = 0
+  const bridge = makeBridge({ candidates: CANDIDATES, running: true, stateSequence: [runningState], stateFailures: 3 })
+  loaded.state.responses = (url, init) => bridge(url, init)
+  const view = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+  await settle(view)
+  const liveIntervals = () => loaded.state.intervals.filter(fn => typeof fn === 'function')
+  ok(liveIntervals().length >= 1, '检测到 running 后开始轮询', loaded.state.intervals.length)
+
+  /**
+   * 推进一次轮询（等价于 POLL_MS 到点）并重渲染。
+   * @returns {Promise<void>} 完成。
+   */
+  const tick = async () => {
+    for (const interval of [...liveIntervals()]) interval()
+    await settle(view)
+  }
+  await tick()
+  const afterFirst = view.texts().join(' | ')
+  ok(afterFirst.includes('进度状态读取失败'), '第 1 次失败提示「进度状态读取失败（可重试）」', afterFirst.slice(0, 300))
+  ok(!afterFirst.includes('DSH 已退出或正在重启'), '第 1 次失败还不会显示失联文案', afterFirst.slice(0, 300))
+  await tick()
+  await tick()
+  const afterLost = view.texts().join(' | ')
+  ok(afterLost.includes('DSH 已退出或正在重启，请重新启动后继续'), '连续 3 次失败后显示失联文案', afterLost.slice(0, 400))
+  ok(!afterLost.includes('进度状态读取失败'), '失联后不再刷「进度状态读取失败（可重试）」', afterLost.slice(0, 400))
+  eq(liveIntervals().length, 0, '失联后停止轮询（定时器已清）', loaded.state.intervals)
+  ok(view.elements().some(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-lost')), '失联提示用 .pmu-lost 样式', view.elements().filter(element => String(element.props?.className ?? '').includes('pmu-notice')).map(element => element.props?.className))
+
+  // 连接恢复：手动「检查更新」成功后清除失联提示。
+  findClickable(view, text => text.trim() === '检查更新')?.props.onClick()
+  await settle(view, 60)
+  ok(!view.texts().join(' | ').includes('DSH 已退出或正在重启'), '连接恢复后失联提示被清除', view.texts().slice(0, 400))
+  eq(loaded.state.consoleErrors.length, 0, '失联用例没有 console.error', loaded.state.consoleErrors)
+}
+
+section('重启提示：restartRequired > 0 时提示重启，但不自动重启')
+{
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const finishedState = {
+    ok: true,
+    running: false,
+    stopped: false,
+    finished: true,
+    summary: { total: 3, success: 3, failed: 0, cancelled: 0, restartRequired: 2, skipped: 0, pending: 0 },
+    active: null,
+    activeRequestId: null,
+    items: [
+      { name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'npm', requestId: 'req-1', stage: 'done', success: true, failed: false, restartRequired: true, cancelled: false, error: null, restore: null },
+      { name: 'demo-plugin-b', current: '0.9.1', latest: '1.0.0', version: '1.0.0', kind: 'git', requestId: 'req-2', stage: 'done', success: true, failed: false, restartRequired: true, cancelled: false, error: null, restore: null },
+      { name: 'demo-plugin-c', current: '2.0.0', latest: '3.0.0', version: '3.0.0', kind: 'npm', requestId: 'req-3', stage: 'done', success: true, failed: false, restartRequired: false, cancelled: false, error: null, restore: null },
+    ],
+    logs: [],
+  }
+  loaded.state.intervals.length = 0
+  const bridge = makeBridge({ candidates: CANDIDATES, running: true, stateSequence: [finishedState] })
+  loaded.state.responses = (url, init) => bridge(url, init)
+  const view = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+  await settle(view)
+  for (const interval of [...loaded.state.intervals.filter(fn => typeof fn === 'function')]) interval()
+  await settle(view, 60)
+
+  const joined = view.texts().join(' | ')
+  ok(joined.includes('2 项已更新，重启 DSH 后生效'), 'restartRequired=2 时显示「2 项已更新，重启 DSH 后生效」', joined.slice(0, 500))
+  ok(view.elements().some(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-restartNotice')), '重启提示用 .pmu-restartNotice 样式', view.elements().filter(element => String(element.props?.className ?? '').includes('pmu-notice')).map(element => element.props?.className))
+  // 不自动重启、不杀进程：结束时只有 GET，没有写请求，也没有「重启」按钮。
+  const writes = bridge.calls.filter(call => call.method !== 'GET').map(call => call.url)
+  eq(writes, [], '结束时不发任何写请求（不自动重启/不杀进程）', bridge.calls.map(call => `${call.method} ${call.url}`))
+  eq(findClickable(view, text => /^重启( DSH)?$/u.test(text.trim())), null, '没有「重启」按钮')
+
+  // restartRequired=0 时不显示该提示。
+  const noRestartState = { ...finishedState, summary: { total: 1, success: 1, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 }, items: [finishedState.items[2]] }
+  loaded.state.intervals.length = 0
+  const bridge2 = makeBridge({ candidates: CANDIDATES, running: true, stateSequence: [noRestartState] })
+  loaded.state.responses = (url, init) => bridge2(url, init)
+  const view2 = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+  await settle(view2)
+  for (const interval of [...loaded.state.intervals.filter(fn => typeof fn === 'function')]) interval()
+  await settle(view2, 60)
+  ok(!view2.texts().join(' | ').includes('重启 DSH 后生效'), 'restartRequired=0 时不显示重启提示', view2.texts().slice(0, 400))
+  eq(loaded.state.consoleErrors.length, 0, '重启提示用例没有 console.error', loaded.state.consoleErrors)
+}
+
+section('中断恢复区块：渲染 / 重新安装与忽略载荷 / 成功后移除')
+{
+  const info = loaded.exports.inspectable()
+  eq(typeof info.readInterrupted, 'function', 'inspectable 暴露 readInterrupted（纯函数）')
+  const interruptedRecords = [
+    { name: 'rec-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-npm', phase: 'installing', startedAt: 1_700_000_000_000 },
+    { name: 'rec-git', current: '1.0.0', target: '1.1.0', kind: 'git', spec: 'git+https://github.com/acme/demo-git.git#' + 'b'.repeat(40), requestId: 'req-git', phase: 'removing', startedAt: 1_700_000_001_000 },
+  ]
+  eq(info.readInterrupted?.(interruptedRecords).map(record => record.name), ['rec-npm', 'rec-git'], 'readInterrupted 归一两条记录')
+  eq(info.readInterrupted?.(undefined), [], 'readInterrupted(undefined) = []')
+  eq(info.readInterrupted?.([{ name: '' }]), [], 'readInterrupted 丢掉没有包名的坏记录')
+
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
+  /**
+   * 在某个容器元素里按文案找按钮。
+   * @param {object} container - 宿主元素。
+   * @param {string} label - 按钮文案。
+   * @returns {object|null} 按钮。
+   */
+  const buttonIn = (container, label) => {
+    if (container === undefined) return null
+    return collectElements(container).find(element => element.type === 'button' && elementText(element).trim() === label) ?? null
+  }
+  const headOf = (view) => view.elements().find(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-interruptedHead'))
+  const rowsOf = (view) => view.elements().filter(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-interruptedRow'))
+
+  let current = interruptedRecords
+  const bridge = makeBridge({ candidates: CANDIDATES, interrupted: () => current, onRecover: (next) => { current = next } })
+  loaded.state.responses = (url, init) => bridge(url, init)
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const view = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+  await settle(view)
+
+  const joined = view.texts().join(' | ')
+  ok(joined.includes('上次更新中断'), '渲染「上次更新中断」标题', joined.slice(0, 400))
+  ok(joined.includes('2 项没装完'), '显示「2 项没装完」说明', joined.slice(0, 400))
+  ok(view.elements().some(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-interrupted')), '区块用 .pmu-interrupted 样式')
+  ok(joined.includes('rec-npm') && joined.includes('rec-git'), '逐行显示包名', joined.slice(0, 500))
+  ok(joined.includes('1.0.0 → 2.0.0'), '显示当前 → 目标版本', joined.slice(0, 500))
+  ok(joined.includes('npm') && joined.includes('git'), '显示来源徽标（npm / git）')
+  ok(buttonIn(headOf(view), '重新安装') !== null, '区块头部有整批「重新安装」按钮', elementText(headOf(view) ?? {}).slice(0, 200))
+  ok(findClickable(view, text => text.trim() === '忽略') !== null, '有「忽略」按钮', view.texts().slice(0, 400))
+  eq(rowsOf(view).length, 2, '两行中断记录')
+
+  // 单行重新安装：{items:[{name}]}。
+  const gitRow = rowsOf(view).find(row => elementText(row).includes('rec-git'))
+  ok(gitRow !== undefined, '找到 rec-git 那一行', rowsOf(view).map(row => elementText(row)))
+  ok(buttonIn(gitRow, '重新安装') !== null, '中断行内有单行「重新安装」按钮', gitRow === undefined ? undefined : elementText(gitRow))
+  buttonIn(gitRow, '重新安装')?.props.onClick()
+  await settle(view, 60)
+  const singleCall = bridge.calls.find(call => call.url === `${API}/updates/recover`)
+  eq(singleCall?.body, { items: [{ name: 'rec-git' }] }, '单行重新安装发 {items:[{name}]}')
+
+  // 整批重新安装：{}。
+  const before = bridge.calls.filter(call => call.url === `${API}/updates/recover`).length
+  buttonIn(headOf(view), '重新安装')?.props.onClick()
+  await settle(view, 60)
+  const bulkCall = bridge.calls.filter(call => call.url === `${API}/updates/recover`)[before]
+  eq(bulkCall?.body, {}, '整批重新安装发 {}')
+
+  // 全部成功 → 区块消失并给反馈。
+  // 注意：单行恢复已摘掉 rec-git，整批只剩 rec-npm 一项，所以反馈是「已重新安装 1 项」。
+  ok(!view.texts().join(' | ').includes('上次更新中断'), '全部恢复成功后区块消失', view.texts().slice(0, 400))
+  ok(view.texts().join(' | ').includes('已重新安装 1 项'), '给出「已重新安装 N 项」反馈（单行+整批共处理完 2 项）', view.texts().slice(0, 400))
+  eq(bridge.calls.filter(call => call.url === `${API}/updates/recover`).length, 2, '单行 + 整批各发一次 recover')
+  eq(current, [], '恢复完成后残留为空', current)
+
+  // 失败项保留并显示原因。
+  current = [
+    { name: 'rec-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-npm', phase: 'installing', startedAt: 1_700_000_000_000 },
+    { name: 'boom-npm', current: '1.0.0', target: '9.9.9', kind: 'npm', requestId: 'req-boom', phase: 'installing', startedAt: 1_700_000_002_000 },
+  ]
+  const bridge2 = makeBridge({ candidates: CANDIDATES, interrupted: () => current, onRecover: (next) => { current = next }, recoverOutcomes: { 'boom-npm': { ok: false, error: '目标版本不存在' } } })
+  loaded.state.responses = (url, init) => bridge2(url, init)
+  const view2 = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+  await settle(view2)
+  buttonIn(headOf(view2), '重新安装')?.props.onClick()
+  await settle(view2, 60)
+  const joined2 = view2.texts().join(' | ')
+  ok(joined2.includes('boom-npm'), '失败项保留在区块里', joined2.slice(0, 500))
+  ok(joined2.includes('目标版本不存在'), '失败项显示原因', joined2.slice(0, 500))
+  ok(!joined2.includes('rec-npm'), '成功项从区块移除', joined2.slice(0, 500))
+  ok(joined2.includes('已重新安装 1 项，1 项失败'), '给出部分成功反馈', joined2.slice(0, 500))
+
+  // 忽略：POST /updates/clear-interrupted {}，区块消失。
+  findClickable(view2, text => text.trim() === '忽略')?.props.onClick()
+  await settle(view2, 60)
+  eq(bridge2.calls.find(call => call.url === `${API}/updates/clear-interrupted`)?.body, {}, '忽略发 POST /updates/clear-interrupted {}')
+  ok(!view2.texts().join(' | ').includes('上次更新中断'), '忽略后区块消失', view2.texts().slice(0, 400))
+  ok(view2.texts().join(' | ').includes('已忽略'), '忽略后给出反馈', view2.texts().slice(0, 400))
+  eq(loaded.state.consoleErrors.length, 0, '中断恢复用例没有 console.error', loaded.state.consoleErrors)
 }
 
 

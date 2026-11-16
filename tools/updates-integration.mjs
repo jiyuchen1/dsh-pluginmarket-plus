@@ -248,7 +248,7 @@ function bundle(patch) {
  * @returns {object} 假服务。
  */
 function makePluginManager(bundles, options = {}) {
-  const calls = { listBundles: 0, listVersions: [], updateBundle: [], cancelInstall: [], waitForInstall: [], setVersionExemption: [] }
+  const calls = { listBundles: 0, listVersions: [], updateBundle: [], cancelInstall: [], waitForInstall: [], setVersionExemption: [], installBundle: [] }
   const versionLists = options.versionsBy ?? {}
   let bundleCursor = 0
   return {
@@ -271,6 +271,13 @@ function makePluginManager(bundles, options = {}) {
       if (typeof outcome === 'function') return outcome(name, version, updateOptions)
       if (options.delayMs !== undefined && options.delayMs > 0) await sleep(options.delayMs)
       return outcome ?? applied(name, version)
+    },
+    async installBundle(spec) {
+      calls.installBundle.push(spec)
+      const outcome = options.installOutcomes?.[spec]
+      if (typeof outcome === 'function') return outcome(spec)
+      if (outcome !== undefined) return outcome
+      return { changed: true, application: 'applied', stage: 'install', target: spec }
     },
     async cancelInstall(requestId) {
       calls.cancelInstall.push(requestId)
@@ -1074,6 +1081,129 @@ section('设置持久化：两个开关经 /settings 落盘')
   broken.dispose()
   rmSync(app.profileDir, { recursive: true, force: true })
   rmSync(broken.profileDir, { recursive: true, force: true })
+}
+
+section('中断恢复：interrupted / recover / clear-interrupted')
+{
+  /**
+   * 往假 profile 的缓存目录写一份中断日志（真实 Host 的 `{version,items}` 形状）。
+   * @param {object} app - boot 句柄。
+   * @param {object[]} items - 记录。
+   * @returns {void}
+   */
+  const writeInflightFile = (app, items) => {
+    mkdirSync(app.cacheDir, { recursive: true })
+    writeFileSync(join(app.cacheDir, 'updates-inflight.json'), JSON.stringify({ version: 1, items }, null, 2), 'utf8')
+  }
+  /**
+   * 读回中断日志文件（不存在时返回 null）。
+   * @param {object} app - boot 句柄。
+   * @returns {object|null} 解析结果。
+   */
+  const readInflightFile = (app) => {
+    const path = join(app.cacheDir, 'updates-inflight.json')
+    if (!existsSync(path)) return null
+    return JSON.parse(readFileSync(path, 'utf8'))
+  }
+
+  const bundles = [
+    bundle({ name: 'rec-npm', source: 'rec-npm@1.0.0', update: 'registry' }),
+    bundle({ name: 'rec-git', version: '1.0.0', source: GIT_HTTPS_OLD, update: 'git' }),
+  ]
+  const manager = makePluginManager(bundles, {
+    installOutcomes: {
+      'rec-npm@2.0.0': { changed: true, application: 'applied', stage: 'install', target: 'rec-npm@2.0.0' },
+      [`git+https://github.com/acme/demo-git.git#${COMMIT_NEW}`]: { changed: true, application: 'restart-required', stage: 'install', target: 'rec-git' },
+      'boom-npm@9.9.9': { changed: false, application: 'failed', stage: 'install', error: { code: 'install-failed', diagnostic: '目标版本不存在' } },
+    },
+  })
+  const app = await boot({ bundles, manager })
+
+  // 1) 默认没有残留。
+  const first = await app.call(`${API}/updates`)
+  eq(first.status, 200, 'GET /updates 200')
+  eq(first.body.interrupted, [], 'GET /updates 的 interrupted 默认是 []')
+  eq(readInflightFile(app), null, '没有残留时不写中断日志文件')
+
+  // 2) 模拟进程被杀：文件里留下一条 npm 与一条 git 记录。
+  writeInflightFile(app, [
+    { name: 'rec-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-npm', phase: 'installing', startedAt: 1_700_000_000_000 },
+    { name: 'rec-git', current: '1.0.0', target: '1.1.0', kind: 'git', spec: `git+https://github.com/acme/demo-git.git#${COMMIT_NEW}`, requestId: 'req-git', phase: 'removing', startedAt: 1_700_000_001_000 },
+  ])
+  const listed = await app.call(`${API}/updates`)
+  eq(listed.status, 200, '有残留时 GET /updates 仍 200')
+  eq(listed.body.interrupted.map(record => record.name), ['rec-npm', 'rec-git'], 'interrupted 含两个残留包（按写入顺序）')
+  const npmRecord = listed.body.interrupted.find(record => record.name === 'rec-npm')
+  const gitRecord = listed.body.interrupted.find(record => record.name === 'rec-git')
+  eq(
+    { name: npmRecord?.name, current: npmRecord?.current, target: npmRecord?.target, kind: npmRecord?.kind, phase: npmRecord?.phase, requestId: npmRecord?.requestId, startedAt: npmRecord?.startedAt },
+    { name: 'rec-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', phase: 'installing', requestId: 'req-npm', startedAt: 1_700_000_000_000 },
+    'npm 记录字段完整（name/current/target/kind/phase/requestId/startedAt）',
+  )
+  eq(gitRecord?.spec, `git+https://github.com/acme/demo-git.git#${COMMIT_NEW}`, 'git 记录带原固定 commit 的 spec')
+  eq(gitRecord?.kind, 'git', 'git 记录 kind=git')
+
+  // 3) 单行恢复：只发 {items:[{name:'rec-git'}]}，只重装该包且用原 spec。
+  const single = await app.call(`${API}/updates/recover`, { body: { items: [{ name: 'rec-git' }] } })
+  eq(single.status, 200, 'POST /updates/recover（单行）200')
+  eq(manager.calls.installBundle, [`git+https://github.com/acme/demo-git.git#${COMMIT_NEW}`], 'git 项用原 spec 调 installBundle')
+  eq(single.body.results, [{ name: 'rec-git', ok: true }], 'restart-required 也算恢复成功')
+  eq(single.body.interrupted.map(record => record.name), ['rec-npm'], '成功项从返回的 interrupted 中移除')
+  eq(readInflightFile(app)?.items.map(record => record.name), ['rec-npm'], '成功项也从磁盘文件移除（失败/未处理的保留）')
+
+  // 4) 整批恢复：npm 项调 installBundle('name@target')；失败项保留并带原因。
+  writeInflightFile(app, [
+    { name: 'rec-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-npm', phase: 'installing', startedAt: 1_700_000_000_000 },
+    { name: 'boom-npm', current: '1.0.0', target: '9.9.9', kind: 'npm', requestId: 'req-boom', phase: 'installing', startedAt: 1_700_000_002_000 },
+  ])
+  const all = await app.call(`${API}/updates/recover`, { body: {} })
+  eq(all.status, 200, 'POST /updates/recover（整批）200')
+  ok(manager.calls.installBundle.includes('rec-npm@2.0.0'), 'npm 项用 name@target 调 installBundle', manager.calls.installBundle)
+  ok(manager.calls.installBundle.includes('boom-npm@9.9.9'), '失败项也尝试重装', manager.calls.installBundle)
+  const boom = all.body.results.find(result => result.name === 'boom-npm')
+  eq(boom?.ok, false, '失败项 ok=false')
+  ok(typeof boom?.error === 'string' && boom.error.includes('目标版本不存在'), '失败项带上 diagnostic', boom)
+  eq(all.body.interrupted.map(record => record.name), ['boom-npm'], '只保留失败项')
+  eq(readInflightFile(app)?.items.map(record => record.name), ['boom-npm'], '磁盘文件只保留失败项')
+
+  // 5) 请求体点名不在残留列表里 → 400。
+  const unknown = await app.call(`${API}/updates/recover`, { body: { items: [{ name: 'nope-pkg' }] } })
+  eq(unknown.status, 400, '点名不存在的包 → 400')
+  eq(unknown.body.error, 'unknown-items', '400 的 error=unknown-items')
+
+  // 6) 队列在跑时 recover 返回 409。
+  const slowManager = makePluginManager(bundles, { delayMs: 250 })
+  const busyApp = await boot({ bundles, manager: slowManager })
+  writeInflightFile(busyApp, [{ name: 'rec-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', phase: 'installing', startedAt: 1_700_000_000_000 }])
+  await busyApp.call(`${API}/updates/check`, { body: {} })
+  await busyApp.call(`${API}/updates/apply`, { body: { items: [{ name: 'rec-npm' }] } })
+  const conflict = await busyApp.call(`${API}/updates/recover`, { body: {} })
+  eq(conflict.status, 409, '队列在跑时 recover 返回 409')
+  eq(conflict.body.error, 'update-running', '409 的 error=update-running')
+  eq(slowManager.calls.installBundle, [], '409 时没有发起任何 installBundle')
+  await waitFor(async () => (await busyApp.call(`${API}/updates/state`)).body.finished === true, '慢队列跑完')
+
+  // 7) clear-interrupted：返回 cleared 并清空文件。
+  const cleared = await app.call(`${API}/updates/clear-interrupted`, { body: {} })
+  eq(cleared.status, 200, 'POST /updates/clear-interrupted 200')
+  eq(cleared.body.ok, true, 'clear 返回 ok=true')
+  eq(cleared.body.cleared.map(record => record.name), ['boom-npm'], 'clear 返回被清掉的记录')
+  eq(cleared.body.interrupted, [], 'clear 后 interrupted=[]')
+  eq(readInflightFile(app), null, 'clear 后磁盘文件已删除')
+  const afterClear = await app.call(`${API}/updates`)
+  eq(afterClear.body.interrupted, [], 'clear 后 GET /updates 的 interrupted 为空')
+
+  // 8) 队列正常跑完会把中断日志清空（不残留）。
+  const cleanApp = await boot({ bundles, manager: makePluginManager(bundles, {}) })
+  await cleanApp.call(`${API}/updates/check`, { body: {} })
+  await cleanApp.call(`${API}/updates/apply`, { body: { items: [{ name: 'rec-npm' }] } })
+  await waitFor(async () => (await cleanApp.call(`${API}/updates/state`)).body.finished === true, '队列跑完')
+  eq(readInflightFile(cleanApp), null, '队列正常跑完后不留下中断日志')
+
+  app.dispose()
+  busyApp.dispose()
+  cleanApp.dispose()
+  for (const handle of [app, busyApp, cleanApp]) rmSync(handle.profileDir, { recursive: true, force: true })
 }
 
 // ---------------------------------------------------------------------------

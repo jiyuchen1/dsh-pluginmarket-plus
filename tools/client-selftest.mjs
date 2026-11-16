@@ -607,6 +607,7 @@ function defaultFetch(options = {}) {
   const settingsRef = options.settingsRef ?? { updatesIncludeDisabled: false, updatesIncludePrerelease: false, updatesShowFailed: false }
   const stateSeq = options.stateSeq ?? null
   const candidates = options.candidates ?? CANDIDATES
+  const interruptedRef = options.interruptedRef ?? { items: [] }
   let stateIndex = 0
   const impl = async (url, init = {}) => {
     const method = init.method ?? 'GET'
@@ -622,6 +623,7 @@ function defaultFetch(options = {}) {
         // 真实 Host：GET /updates 的 config.showFailed，POST/status 回 updatesShowFailed。
         config: Object.assign({}, settingsRef, { showFailed: settingsRef.updatesShowFailed === true }),
         running: false,
+        interrupted: interruptedRef.items,
       })
     }
     if (url === '/api/pluginmarket-plus/settings' && method === 'POST') {
@@ -669,6 +671,26 @@ function defaultFetch(options = {}) {
         : stateSeq[Math.min(stateIndex, stateSeq.length - 1)]
       stateIndex += 1
       return json(payload)
+    }
+    if (url === '/api/pluginmarket-plus/updates/recover') {
+      const wanted = Array.isArray(body?.items) ? body.items.map(item => item?.name).filter(name => typeof name === 'string') : []
+      const targets = wanted.length === 0 ? interruptedRef.items.slice() : interruptedRef.items.filter(item => wanted.includes(item.name))
+      if (wanted.length > 0 && targets.length === 0) return json({ ok: false, error: 'unknown-items' }, 400)
+      const results = []
+      /** 只摘除「成功恢复」的项；失败项与未点名的项都留在残留里（与 Host 一致）。 */
+      const recovered = []
+      for (const item of targets) {
+        const outcome = options.recoverOutcomes?.[item.name]
+        if (outcome === undefined || outcome === true) { results.push({ name: item.name, ok: true }); recovered.push(item.name) }
+        else results.push({ name: item.name, ok: false, error: String(outcome) })
+      }
+      interruptedRef.items = interruptedRef.items.filter(item => !recovered.includes(item.name))
+      return json({ ok: true, results, interrupted: interruptedRef.items })
+    }
+    if (url === '/api/pluginmarket-plus/updates/clear-interrupted') {
+      const cleared = interruptedRef.items
+      interruptedRef.items = []
+      return json({ ok: true, cleared, interrupted: [] })
     }
     if (url === '/api/pluginmarket-plus/updates/cancel') {
       return json({ ok: true, cancelled: true, name: 'demo-plugin-a', state: { running: false, stopped: true, finished: false, items: [] } })
@@ -2033,6 +2055,226 @@ test('打开页面时已有队列在跑 → 提示并接上进度', async () => 
   await tickPoll(context)
   ok(allText(context).includes('更新进度') && allText(context).includes('安装'), '接上了正在运行的进度')
   context.unmount()
+})
+
+test('失联：连续 3 次轮询失败后停止轮询并显示失联文案，恢复后清除', async () => {
+  bootClient()
+  const impl = defaultFetch()
+  let stateCalls = 0
+  let stateFails = true
+  // 打开页面时队列就在跑 → 自动接上进度并开始轮询；/updates/state 先连续失败。
+  fakeFetch = withCalls(async (url, init) => {
+    if (url === '/api/pluginmarket-plus/updates') {
+      const response = await impl(url, init)
+      const payload = await response.json()
+      return { ok: true, status: 200, json: async () => Object.assign({}, payload, { running: true }) }
+    }
+    if (url === '/api/pluginmarket-plus/updates/state') {
+      stateCalls += 1
+      if (stateFails) throw new Error('ECONNREFUSED')
+      return { ok: true, status: 200, json: async () => ({ ok: true, running: false, finished: true, items: [], summary: {} }) }
+    }
+    return impl(url, init)
+  })
+  const context = await renderUpdates()
+  // startPolling 会立刻 poll 一次 → 第 1 次失败
+  await settle(context)
+  eq(stateCalls, 1, '挂载后立刻轮询一次')
+  ok(allText(context).includes('进度状态读取失败（可重试）'), '第 1 次失败：提示可重试')
+  await tickPoll(context)
+  eq(stateCalls, 2, '第 2 次轮询')
+  ok(!allText(context).includes('DSH 已退出或正在重启'), '第 2 次失败：还不算失联')
+  await tickPoll(context)
+  eq(stateCalls, 3, '第 3 次轮询')
+  ok(allText(context).includes('DSH 已退出或正在重启，请重新启动后继续'), '第 3 次失败：显示失联文案')
+  ok(!allText(context).includes('进度状态读取失败（可重试）'), '失联后不再显示「读取失败（可重试）」')
+  await tickPoll(context)
+  eq(stateCalls, 3, '失联后停止轮询（不再请求 /updates/state）')
+  // 恢复：手动检查成功 → 失联提示消失
+  stateFails = false
+  await clickButton(context, '检查更新')
+  await settle(context)
+  ok(!allText(context).includes('DSH 已退出或正在重启'), '手动检查成功后清除失联提示')
+  context.unmount()
+})
+
+test('nextPollFailure：阈值 3', () => {
+  const { component } = bootClient()
+  const { nextPollFailure, lostThreshold } = component.inspectable()
+  eq(lostThreshold, 3, '阈值是 3')
+  eq(JSON.stringify(nextPollFailure(0)), JSON.stringify({ count: 1, lost: false }), '第 1 次不算失联')
+  eq(JSON.stringify(nextPollFailure(1)), JSON.stringify({ count: 2, lost: false }), '第 2 次不算失联')
+  eq(JSON.stringify(nextPollFailure(2)), JSON.stringify({ count: 3, lost: true }), '第 3 次判为失联')
+  eq(JSON.stringify(nextPollFailure(3)), JSON.stringify({ count: 4, lost: true }), '继续失败仍是失联')
+  eq(JSON.stringify(nextPollFailure(undefined)), JSON.stringify({ count: 1, lost: false }), '未初始化按 0 处理')
+})
+
+test('批量行为不变：restart-required 不暂停队列，继续更新下一项', async () => {
+  bootClient()
+  const stateSeq = [
+    hostState({
+      running: true, active: 'demo-plugin-a', activeRequestId: 'req-1',
+      summary: { total: 2, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 2 },
+      items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'installing', startedAt: 1 })],
+    }),
+    hostState({
+      running: true, active: 'demo-plugin-b', activeRequestId: 'req-2',
+      summary: { total: 2, success: 1, failed: 0, cancelled: 0, restartRequired: 1, skipped: 0, pending: 1 },
+      items: [
+        hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'done', success: true, restartRequired: true, startedAt: 1, endedAt: 2 }),
+        hostItem({ name: 'demo-plugin-b', requestId: 'req-2', stage: 'installing', startedAt: 3 }),
+      ],
+    }),
+    hostState({
+      running: false, finished: true,
+      summary: { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 1, skipped: 0, pending: 0 },
+      items: [
+        hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'done', success: true, restartRequired: true, startedAt: 1, endedAt: 2 }),
+        hostItem({ name: 'demo-plugin-b', requestId: 'req-2', stage: 'done', success: true, startedAt: 3, endedAt: 4 }),
+      ],
+    }),
+  ]
+  fakeFetch = defaultFetch({ stateSeq })
+  const context = await renderUpdates()
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await tickPoll(context)
+  let text = allText(context)
+  ok(text.includes('demo-plugin-b') && text.includes('安装'), '第一项 restart-required 后队列继续跑第二项')
+  ok(!text.includes('重启 DSH 后生效'), '未结束时还不显示结束提示')
+  await tickPoll(context)
+  await settle(context)
+  text = allText(context)
+  ok(text.includes('重启 DSH 后生效'), '全部结束后才提示重启')
+  const applyCall = fakeFetch.calls.find(item => item.url.endsWith('/updates/apply'))
+  eq(applyCall.body.items.length, 2, '两项都入了队（restart-required 没有中断后续项）')
+  context.unmount()
+})
+
+test('批量结束：restartRequired > 0 时进度面板顶部提示重启', async () => {
+  bootClient()
+  const stateSeq = [
+    hostState({
+      running: true, active: 'demo-plugin-a', activeRequestId: 'req-1',
+      summary: { total: 2, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 2 },
+      items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'installing', startedAt: 1 })],
+    }),
+    hostState({
+      running: false, finished: true,
+      summary: { total: 2, success: 1, failed: 0, cancelled: 0, restartRequired: 1, skipped: 0, pending: 0 },
+      items: [
+        hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'done', success: true, startedAt: 1, endedAt: 2 }),
+        hostItem({ name: 'demo-plugin-b', requestId: 'req-2', stage: 'done', success: true, restartRequired: true, startedAt: 1, endedAt: 2 }),
+      ],
+    }),
+  ]
+  fakeFetch = defaultFetch({ stateSeq })
+  const context = await renderUpdates()
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await tickPoll(context)
+  await tickPoll(context)
+  await settle(context)
+  const text = allText(context)
+  ok(text.includes('1 项已更新，重启 DSH 后生效'), '进度面板顶部显示重启提示')
+  const panel = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-restartNotice'))
+  ok(panel !== undefined, '提示有专属 class（醒目样式）')
+  ok(String(panel.props.className).includes('pmu-notice'), '复用 pmu-notice 样式')
+  // 不自动重启、不杀进程：没有额外的「重启」按钮
+  ok(!collect(context.result).some(el => el.type === 'button' && nodeText(el).trim() === '重启 DSH'), '不提供自动重启按钮')
+  context.unmount()
+})
+
+test('中断恢复：interrupted 区块渲染 + 重新安装 / 忽略的请求载荷', async () => {
+  bootClient()
+  const interruptedRef = { items: [
+    { name: 'demo-plugin-a', current: '1.2.0', target: '1.4.2', kind: 'npm', requestId: 'req-1', phase: 'installing', startedAt: 1 },
+    { name: 'demo-plugin-b', current: '1.0.0', target: '1.1.0', kind: 'git', requestId: 'req-2', phase: 'installing', startedAt: 1, spec: 'github:o/r#abc' },
+  ] }
+  fakeFetch = defaultFetch({ interruptedRef })
+  const context = await renderUpdates()
+  let text = allText(context)
+  ok(text.includes('上次更新中断'), '列表上方显示「上次更新中断」区块')
+  ok(text.includes('2 项没装完'), '区块说明含残留数量')
+  ok(text.includes('demo-plugin-a') && text.includes('1.2.0') && text.includes('1.4.2'), '逐项列出包名与当前/目标版本')
+  ok(text.includes('重新安装') && text.includes('忽略'), '有「重新安装」与「忽略」按钮')
+  const block = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-interrupted'))
+  ok(block !== undefined, '区块有专属 class')
+  // 整批重新安装
+  await clickButton(context, '重新安装')
+  const recoverCall = fakeFetch.calls.filter(item => item.url === '/api/pluginmarket-plus/updates/recover').pop()
+  ok(recoverCall !== undefined, 'POST /updates/recover')
+  eq(recoverCall.method, 'POST', 'recover 用 POST')
+  eq(JSON.stringify(recoverCall.body), '{}', '整批恢复发空对象')
+  text = allText(context)
+  ok(!text.includes('上次更新中断'), '全部成功后区块消失')
+  ok(text.includes('已重新安装 2 项'), '反馈已重新安装 2 项')
+  context.unmount()
+  // 忽略：换一批残留记录重新挂载
+  bootClient()
+  const secondRef = { items: [{ name: 'demo-plugin-c', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-3', phase: 'installing', startedAt: 1 }] }
+  fakeFetch = defaultFetch({ interruptedRef: secondRef })
+  const context2 = await renderUpdates()
+  ok(allText(context2).includes('上次更新中断'), '重新出现中断区块')
+  await clickButton(context2, '忽略')
+  const clearCall = fakeFetch.calls.filter(item => item.url === '/api/pluginmarket-plus/updates/clear-interrupted').pop()
+  ok(clearCall !== undefined, 'POST /updates/clear-interrupted')
+  eq(clearCall.method, 'POST', 'clear-interrupted 用 POST')
+  eq(JSON.stringify(clearCall.body), '{}', '忽略发空对象')
+  ok(!allText(context2).includes('上次更新中断'), '忽略后区块消失')
+  ok(allText(context2).includes('已忽略上次中断的更新记录'), '忽略后有反馈')
+  context2.unmount()
+})
+
+test('中断恢复：单行重新安装只点名该包，失败项保留并显示原因', async () => {
+  bootClient()
+  const interruptedRef = { items: [
+    { name: 'demo-plugin-a', current: '1.2.0', target: '1.4.2', kind: 'npm', requestId: 'req-1', phase: 'installing', startedAt: 1 },
+    { name: 'demo-plugin-b', current: '1.0.0', target: '1.1.0', kind: 'git', requestId: 'req-2', phase: 'installing', startedAt: 1, spec: 'github:o/r#abc' },
+  ] }
+  fakeFetch = defaultFetch({ interruptedRef, recoverOutcomes: { 'demo-plugin-b': 'ENOSPC: no space left' } })
+  const context = await renderUpdates()
+  ok(allText(context).includes('上次更新中断'), '有中断区块')
+  // 点第二行（demo-plugin-b）的「重新安装」→ 失败保留
+  const rows = collect(context.result).filter(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-interruptedRow'))
+  eq(rows.length, 2, '两行残留项')
+  const buttons = collect(rows[1]).filter(el => el.type === 'button')
+  buttons[0].props.onClick()
+  await settle(context)
+  const call = fakeFetch.calls.filter(item => item.url === '/api/pluginmarket-plus/updates/recover').pop()
+  eq(JSON.stringify(call.body), JSON.stringify({ items: [{ name: 'demo-plugin-b' }] }), '单行恢复只点名该包')
+  const text = allText(context)
+  ok(text.includes('上次更新中断'), '失败项仍在，区块保留')
+  ok(text.includes('demo-plugin-b') && text.includes('ENOSPC: no space left'), '失败项保留并显示原因')
+  ok(text.includes('demo-plugin-a'), '未被点名的项仍留在区块里')
+  ok(text.includes('已重新安装 0 项，1 项失败'), '失败反馈')
+  // 再点第一行（demo-plugin-a）的「重新安装」→ 成功项被移除，只剩失败的 b
+  const rows2 = collect(context.result).filter(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-interruptedRow'))
+  eq(rows2.length, 2, '仍是两行')
+  collect(rows2[0]).filter(el => el.type === 'button')[0].props.onClick()
+  await settle(context)
+  const block2 = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-interrupted'))
+  const blockText = nodeText(block2)
+  ok(!blockText.includes('demo-plugin-a'), '成功项从区块移除')
+  ok(blockText.includes('demo-plugin-b'), '失败项保留在区块里')
+  ok(allText(context).includes('已重新安装 1 项'), '成功反馈')
+  context.unmount()
+})
+
+test('中断恢复：readInterrupted / readRecoverResults 纯函数', () => {
+  const { component } = bootClient()
+  const { readInterrupted, readRecoverResults } = component.inspectable()
+  eq(readInterrupted(undefined).length, 0, 'undefined → 空数组')
+  eq(readInterrupted([]).length, 0, '空数组 → 空数组')
+  const one = readInterrupted([{ name: 'p', current: '1.0.0', target: '1.1.0', kind: 'git', spec: 'github:o/r#abc', phase: 'installing' }])
+  eq(JSON.stringify(one), JSON.stringify([{ name: 'p', current: '1.0.0', target: '1.1.0', kind: 'git', spec: 'github:o/r#abc', phase: 'installing' }]), '按 Host 字段归一')
+  eq(readInterrupted([{ name: '' }, null, 'x']).length, 0, '丢掉坏记录')
+  eq(readInterrupted([{ name: 'a', kind: 'weird' }])[0].kind, 'npm', 'kind 只认 git，其余归 npm')
+  const merged = readRecoverResults([{ name: 'a', ok: true }, { name: 'b', ok: false, error: 'ENOSPC' }, { name: '' }])
+  eq(JSON.stringify(merged.ok), JSON.stringify(['a']), '成功项')
+  eq(merged.failed.get('b'), 'ENOSPC', '失败项带原因')
+  eq(merged.failed.size, 1, '空名字被忽略')
+  eq(readRecoverResults([{ name: 'c', ok: false }]).failed.get('c'), 'install-failed', '缺原因时兜底文案')
 })
 
 /** ------------------------------------------------------------------ */
