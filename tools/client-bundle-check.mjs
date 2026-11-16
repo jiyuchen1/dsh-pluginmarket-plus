@@ -746,6 +746,7 @@ function makeBridge(options = {}) {
       // updatesDelayMs 用于拉长「POST 已处理、GET 还没回来」的窗口，让中间态可被采样捕捉。
       if (typeof options.updatesDelayMs === 'number' && options.updatesDelayMs > 0) await sleep(options.updatesDelayMs)
       const interrupted = typeof options.interrupted === 'function' ? options.interrupted() : (options.interrupted ?? [])
+      const running = typeof options.running === 'function' ? options.running() === true : options.running === true
       return json({
         ok: true,
         candidates: options.candidates ?? [],
@@ -753,7 +754,7 @@ function makeBridge(options = {}) {
         index: { sources: 1, packages: (options.candidates ?? []).length, error: null },
         // `updatesConfig` 可显式覆盖（例如给 {} 验证「响应没说」时不得覆盖本地状态）。
         config: options.updatesConfig === undefined ? { ...settings } : options.updatesConfig,
-        running: options.running === true,
+        running,
         interrupted,
       })
     }
@@ -777,7 +778,9 @@ function makeBridge(options = {}) {
         throw new Error('fetch failed')
       }
       const sequence = options.stateSequence ?? []
-      const payload = sequence.length === 0 ? { ok: true, running: false, stopped: false, finished: false, summary: null, active: null, activeRequestId: null, items: [], logs: [] } : sequence[Math.min(stateIndex, sequence.length - 1)]
+      const payload = typeof options.stateFor === 'function'
+        ? options.stateFor()
+        : sequence.length === 0 ? { ok: true, running: false, stopped: false, finished: false, summary: null, active: null, activeRequestId: null, items: [], logs: [] } : sequence[Math.min(stateIndex, sequence.length - 1)]
       stateIndex += 1
       return json(payload)
     }
@@ -2408,6 +2411,483 @@ section('中断恢复区块：渲染 / 重新安装与忽略载荷 / 成功后�
   eq(loaded.state.consoleErrors.length, 0, '中断恢复用例没有 console.error', loaded.state.consoleErrors)
 }
 
+
+section('更新状态区域与进度弹窗')
+{
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
+  const t = ctx.locale.bind()
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+  const runState = (view) => view.elements().find(hasClass('pmu-runState'))
+  const dialog = (view) => view.elements().find(element => element.props?.role === 'dialog')
+  const runningState = {
+    ok: true,
+    running: true,
+    stopped: false,
+    finished: false,
+    summary: { total: 2, success: 1, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 1 },
+    active: 'demo-plugin-a',
+    activeRequestId: 'req-1',
+    items: [
+      { name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'npm', requestId: 'req-1', stage: 'done', success: true, failed: false, restartRequired: false, cancelled: false, error: null, restore: null, logs: [] },
+      { name: 'demo-plugin-b', current: '0.9.1', latest: '1.0.0', version: '1.0.0', kind: 'git', requestId: 'req-2', stage: 'installing', success: false, failed: false, restartRequired: false, cancelled: false, error: null, restore: null, logs: ['pnpm 输出：正在安装 demo-plugin-b'] },
+    ],
+    logs: ['pnpm 输出：正在安装 demo-plugin-b'],
+  }
+
+  // 1) 没有队列时状态区域不出现。
+  loaded.state.intervals.length = 0
+  const idleBridge = makeBridge({ candidates: CANDIDATES })
+  loaded.state.responses = (url, init) => idleBridge(url, init)
+  const idleView = render(tab.component, { t, openPackage: () => {} })
+  await settle(idleView)
+  eq(runState(idleView), undefined, '没有队列时不出现更新状态区域')
+  eq(dialog(idleView), undefined, '没有队列时也没有进度弹窗')
+
+  // 2) 更新中：旋转图标 + 「已完成/总数」，点击打开「更新进度」弹窗。
+  loaded.state.intervals.length = 0
+  const bridge = makeBridge({ candidates: CANDIDATES, running: true, stateSequence: [runningState, runningState] })
+  loaded.state.responses = (url, init) => bridge(url, init)
+  const view = render(tab.component, { t, openPackage: () => {} })
+  await settle(view)
+  for (const interval of [...loaded.state.intervals.filter(fn => typeof fn === 'function')]) interval()
+  await settle(view)
+
+  const running = runState(view)
+  ok(running !== undefined, '有队列时出现更新状态区域', view.elements().filter(hasClass('pmu-toolbar')).map(element => element.children?.length))
+  eq(running?.type, 'button', '状态区域是原生 button')
+  eq(running?.props?.['data-state'], 'running', '更新中 data-state=running')
+  eq(running?.props?.['aria-label'], '更新进行中，点击查看更新进度', '更新中 aria-label')
+  eq(running?.props?.title, '更新进行中，点击查看更新进度', '更新中 title 与 aria-label 一致')
+  eq(running?.props?.['aria-haspopup'], 'dialog', '状态区域 aria-haspopup=dialog')
+  eq(elementText(running ?? {}).trim(), '1/2', '更新中文案是「已完成数/总数」')
+  ok(collectElements(running).some(hasClass('pmu-runIcon')), '更新中有旋转图标容器')
+  eq(collectElements(running).filter(hasClass('pmu-runCheck')).length, 0, '更新中不显示对勾')
+
+  // 状态区域在工具条里、且排在「更新已选」之后。
+  const toolbar = view.elements().find(hasClass('pmu-toolbar'))
+  const toolbarChildren = (toolbar?.children ?? []).map(child => String(child?.props?.className ?? ''))
+  const selectedIndex = toolbarChildren.findIndex(name => name.includes('pmp-btn'))
+  ok(toolbarChildren.some(name => name.includes('pmu-runState')), '状态区域在工具条内', toolbarChildren)
+  const runStateIndex = toolbarChildren.findIndex(name => name.includes('pmu-runState'))
+  const lastButtonIndex = toolbarChildren.map((name, index) => (name.includes('pmp-btn') ? index : -1)).filter(index => index >= 0).at(-1)
+  ok(runStateIndex > lastButtonIndex, '状态区域在「更新已选」右侧（工具条最后一个）', { runStateIndex, lastButtonIndex, selectedIndex })
+
+  // CSS：旋转动画 + 降级 + 绿色对勾 token。
+  const css = latestCss(loaded.state)
+  ok(/@keyframes pmu-spin\{/u.test(css), 'CSS 定义了 pmu-spin 关键帧')
+  ok(/\.pmu-runState\[data-state="running"\] \.pmu-runIcon\{[^}]*animation:pmu-spin[^}]*infinite/u.test(css), '更新中图标用无限旋转动画', css.match(/\.pmu-runState\[data-state="running"\][^}]*\}/u)?.[0])
+  ok(/prefers-reduced-motion:reduce[^}]*\.pmu-runIcon\{[^}]*animation:none/u.test(css), 'prefers-reduced-motion 下降级为静态', css.match(/@media \(prefers-reduced-motion[^@]*/u)?.[0]?.slice(0, 160))
+  ok(/\.pmu-runState\[data-state="done"\] \.pmu-runIcon\{[^}]*--dsw-alias-state-success-primary/u.test(css), '结束态图标用 success token 作底色', css.match(/\.pmu-runState\[data-state="done"\][^}]*\}/u)?.[0])
+
+  // 3) 点击状态区域 → 「更新进度」弹窗。
+  eq(dialog(view), undefined, '未点击时没有弹窗（内联进度不再直接渲染）')
+  ok(!view.elements().some(hasClass('pmu-progressItem')), '列表上方不再内联渲染进度项', view.elements().filter(hasClass('pmu-progressItem')).length)
+  running?.props.onClick()
+  await settle(view)
+  const panel = dialog(view)
+  ok(panel !== undefined, '点击状态区域打开弹窗', view.texts().slice(0, 200))
+  eq(panel?.props?.['aria-modal'], 'true', '弹窗 aria-modal=true')
+  eq(panel?.props?.['aria-label'], '更新进度', '弹窗 aria-label=更新进度')
+  ok(String(panel?.props?.className ?? '').includes('pmu-progressModal'), '弹窗用 pmu-progressModal 面板样式', panel?.props?.className)
+  const dialogText = elementText(panel)
+  ok(dialogText.includes('更新进度'), '弹窗标题是「更新进度」', dialogText.slice(0, 200))
+  eq(collectElements(panel).filter(hasClass('pmu-progressItem')).length, 2, '弹窗内有两个进度项')
+  ok(dialogText.includes('demo-plugin-a') && dialogText.includes('demo-plugin-b'), '弹窗内显示进度项名称', dialogText.slice(0, 300))
+  ok(collectElements(panel).some(hasClass('pmu-link')), '弹窗内有「日志」展开按钮', collectElements(panel).filter(hasClass('pmu-link')).length)
+  ok(findClickable(view, text => text.trim() === '取消当前') !== null, '进行中弹窗有「取消当前」按钮', view.texts().slice(0, 300))
+  // 日志展开。
+  collectElements(panel).find(hasClass('pmu-link'))?.props.onClick()
+  await settle(view)
+  ok(collectElements(dialog(view)).some(hasClass('pmu-log')), '点「日志」后展开日志区', collectElements(dialog(view)).filter(hasClass('pmu-log')).length)
+
+  // 4) 进行中关闭弹窗：不发 cancel、不中断队列，状态区域仍在，可再次打开。
+  const cancelBefore = bridge.calls.filter(call => call.url === `${API}/updates/cancel`).length
+  view.elements().find(hasClass('pmu-modalLayer'))?.props.onClick()
+  await settle(view)
+  eq(dialog(view), undefined, '点遮罩关闭弹窗')
+  eq(runState(view)?.props?.['data-state'], 'running', '关闭后状态区域仍在且仍是 running')
+  eq(bridge.calls.filter(call => call.url === `${API}/updates/cancel`).length, cancelBefore, '关闭弹窗不发 cancel（不中断队列）')
+  runState(view)?.props.onClick()
+  await settle(view)
+  ok(dialog(view) !== undefined, '关闭后可再次点开弹窗')
+  // Escape 关闭。
+  loaded.documentStub.dispatch('keydown', { key: 'Escape' })
+  await settle(view)
+  eq(dialog(view), undefined, 'Escape 关闭弹窗')
+  eq(runState(view)?.props?.['data-state'], 'running', 'Escape 关闭后状态区域仍在')
+
+  // 5) 结束态：绿色对勾 + 「已完成/总数」，弹窗里有结束汇总与需重启提示。
+  const finishedState = {
+    ok: true,
+    running: false,
+    stopped: false,
+    finished: true,
+    summary: { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 1, skipped: 0, pending: 0 },
+    active: null,
+    activeRequestId: null,
+    items: [
+      { name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'npm', requestId: 'req-1', stage: 'done', success: true, failed: false, restartRequired: true, cancelled: false, error: null, restore: null, logs: [] },
+      { name: 'demo-plugin-b', current: '0.9.1', latest: '1.0.0', version: '1.0.0', kind: 'git', requestId: 'req-2', stage: 'done', success: true, failed: false, restartRequired: false, cancelled: false, error: null, restore: null, logs: [] },
+    ],
+    logs: [],
+  }
+  loaded.state.intervals.length = 0
+  const doneBridge = makeBridge({ candidates: CANDIDATES, running: true, stateSequence: [finishedState] })
+  loaded.state.responses = (url, init) => doneBridge(url, init)
+  const doneView = render(tab.component, { t, openPackage: () => {} })
+  await settle(doneView)
+  for (const interval of [...loaded.state.intervals.filter(fn => typeof fn === 'function')]) interval()
+  await settle(doneView, 60)
+
+  const done = runState(doneView)
+  eq(done?.props?.['data-state'], 'done', '结束后 data-state=done')
+  eq(done?.props?.['aria-label'], '更新完成，点击查看更新进度', '结束后 aria-label')
+  // 计数契约：2 项队列（1 项 success+restartRequired、1 项 success）应显示 2/2。
+  // 实现里 progressDone = success + failed + restart + skipped 且 Host 的 summary 把
+  // 「需重启」同时算进 success 与 restartRequired（lib/updates.js summary()），
+  // 于是同一项被数两次 → 显示 3/3（总数也跟着被 Math.max 撑大）。见 findings F1。
+  eq(elementText(done ?? {}).trim(), '2/2', '结束后文案同样是「已完成数/总数」')
+  ok(collectElements(done).some(hasClass('pmu-runCheck')), '结束后显示对勾图标', collectElements(done).map(element => element.props?.className))
+  // 页面级重启提示（弹窗关着时也在页面上）。
+  const doneText = doneView.texts().join(' | ')
+  ok(doneText.includes('1 项已更新，重启 DSH 后生效'), '弹窗关着时页面上也显示重启提示', doneText.slice(0, 400))
+
+  done?.props.onClick()
+  await settle(doneView)
+  const donePanel = dialog(doneView)
+  ok(donePanel !== undefined, '结束后点状态区域也能打开弹窗')
+  const donePanelText = elementText(donePanel)
+  ok(/已更新 2 项|成功 2|2 项/.test(donePanelText), '弹窗内有结束汇总', donePanelText.slice(-300))
+  ok(donePanelText.includes('重启'), '弹窗内有需重启提示', donePanelText.slice(-300))
+  ok(findClickable(doneView, text => text.trim() === '完成') !== null, '弹窗内有「完成」按钮', doneView.texts().slice(-200))
+  findClickable(doneView, text => text.trim() === '完成')?.props.onClick()
+  await settle(doneView)
+  eq(dialog(doneView), undefined, '点「完成」关闭弹窗')
+  eq(runState(doneView)?.props?.['data-state'], 'done', '关闭后状态区域仍在（done）')
+  ok(doneView.texts().join(' | ').includes('1 项已更新，重启 DSH 后生效'), '关闭弹窗后页面级重启提示仍在', doneView.texts().slice(0, 400))
+
+  // 6) 「检查完成：可更新 N 项」提示条已移除（文本与类名都不再出现）。
+  ok(!doneView.texts().join(' | ').includes('检查完成'), '页面没有「检查完成」提示条', doneView.texts().slice(0, 300))
+  eq(loaded.exports.inspectable().dict.zh.updatesCheckDone, undefined, '词典已删除 updatesCheckDone 键')
+  eq(loaded.exports.inspectable().dict.en.updatesCheckDone, undefined, '英文词典也删除了 updatesCheckDone')
+  eq(loaded.exports.inspectable().dict.zh.updatesRunStateRunning, '更新进行中，点击查看更新进度', '词典含 updatesRunStateRunning')
+  eq(loaded.exports.inspectable().dict.zh.updatesRunStateDone, '更新完成，点击查看更新进度', '词典含 updatesRunStateDone')
+  eq(loaded.exports.inspectable().dict.zh.updatesProgressTitle, '更新进度', '词典含 updatesProgressTitle')
+  eq(loaded.state.consoleErrors.length, 0, '状态区域与弹窗用例没有 console.error', loaded.state.consoleErrors)
+}
+
+section('计数回归：需重启项不应被重复计入「已完成/总数」')
+{
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
+  const t = ctx.locale.bind()
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+  const runText = (view) => elementText(view.elements().find(hasClass('pmu-runState')) ?? {}).trim()
+  /**
+   * 用一份结束态渲染，返回状态区域文案。
+   * @param {object} state - /updates/state 载荷。
+   * @returns {Promise<object>} view。
+   */
+  const renderFinished = async (state) => {
+    loaded.state.intervals.length = 0
+    const bridge = makeBridge({ candidates: CANDIDATES, running: true, stateSequence: [state] })
+    loaded.state.responses = (url, init) => bridge(url, init)
+    const view = render(tab.component, { t, openPackage: () => {} })
+    await settle(view)
+    for (const interval of [...loaded.state.intervals.filter(fn => typeof fn === 'function')]) interval()
+    await settle(view, 60)
+    return view
+  }
+  const item = (name, extra) => ({ name, current: '1.0.0', latest: '2.0.0', version: '2.0.0', kind: 'npm', requestId: `req-${name}`, stage: 'done', success: true, failed: false, restartRequired: false, cancelled: false, error: null, restore: null, ...extra })
+
+  // A) 全部普通成功（无 restartRequired）：2/2。
+  const plain = await renderFinished({
+    ok: true, running: false, finished: true, stopped: false, active: null, activeRequestId: null, logs: [],
+    summary: { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 },
+    items: [item('a'), item('b')],
+  })
+  eq(runText(plain), '2/2', '普通成功 2 项 → 2/2')
+
+  // B) 一项需要重启（Host 同时计入 success 与 restartRequired）：仍应是 2/2。
+  const withRestart = await renderFinished({
+    ok: true, running: false, finished: true, stopped: false, active: null, activeRequestId: null, logs: [],
+    summary: { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 1, skipped: 0, pending: 0 },
+    items: [item('a', { restartRequired: true }), item('b')],
+  })
+  eq(runText(withRestart), '2/2', '含 1 项需重启 → 仍应是 2/2（不重复计数）')
+
+  // C) 一成功一失败：2/2。
+  const mixed = await renderFinished({
+    ok: true, running: false, finished: true, stopped: false, active: null, activeRequestId: null, logs: [],
+    summary: { total: 2, success: 1, failed: 1, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 },
+    items: [item('a'), item('b', { success: false, failed: true, stage: 'failed', error: '目标版本不存在' })],
+  })
+  eq(runText(mixed), '2/2', '成功 1 + 失败 1 → 2/2')
+
+  // D) 一成功一取消：2/2（取消不应再叠加 skipped 重复计数）。
+  const cancelled = await renderFinished({
+    ok: true, running: false, finished: true, stopped: false, active: null, activeRequestId: null, logs: [],
+    summary: { total: 2, success: 1, failed: 0, cancelled: 1, restartRequired: 0, skipped: 1, pending: 0 },
+    items: [item('a'), item('b', { success: false, cancelled: true, stage: 'cancelled' })],
+  })
+  eq(runText(cancelled), '2/2', '成功 1 + 取消 1 → 2/2（cancelled 与 skipped 同源，不应各算一次）')
+}
+
+section('progressTally 独立复算：done ≤ total 且不重复计数（不依赖实现者单测）')
+{
+  const info = loaded.exports.inspectable()
+  eq(typeof info.progressTally, 'function', 'inspectable 暴露 progressTally（纯函数）')
+  const tally = info.progressTally
+  if (typeof tally === 'function') {
+    const item = (extra) => ({ stage: 'done', success: true, failed: false, cancelled: false, restartRequired: false, ...extra })
+    // A) t36 的原始缺陷场景：2 项队列、1 项需重启（Host summary 里 success 也含它）。
+    eq(tally([item({ restartRequired: true }), item({})], { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 1, skipped: 0, pending: 0 }), { done: 2, total: 2 }, '2 项队列（1 项需重启）→ 2/2（t36 的 F1 回归）')
+    // B) 全部需重启：仍是 2/2，不会变成 4/4。
+    eq(tally([item({ restartRequired: true }), item({ restartRequired: true })], { total: 2, success: 2, restartRequired: 2 }), { done: 2, total: 2 }, '全部需重启 → 2/2（不被重复计数撑成 4/4）')
+    // C) 成功 + 失败。
+    eq(tally([item({}), item({ success: false, failed: true, stage: 'failed' })], { total: 2, success: 1, failed: 1 }), { done: 2, total: 2 }, '成功 + 失败 → 2/2')
+    // D) 成功 + 取消。
+    eq(tally([item({}), item({ success: false, cancelled: true, stage: 'cancelled' })], { total: 2, success: 1, cancelled: 1, skipped: 1 }), { done: 2, total: 2 }, '成功 + 取消 → 2/2')
+    // E) 运行中：只有 1 项终态。
+    eq(tally([item({}), item({ success: false, stage: 'installing' })], { total: 2, success: 1, pending: 1 }), { done: 1, total: 2 }, '运行中 → 1/2')
+    // F) items 还没到：用 Host summary.total 兜底。
+    eq(tally([], { total: 3 }), { done: 0, total: 3 }, 'items 未到 → 0/3（用 summary.total 兜底）')
+    // G) 空输入。
+    eq(tally(undefined, undefined), { done: 0, total: 0 }, '空输入 → 0/0')
+    // H) 不变式：任意组合 done ≤ total。
+    const combos = [
+      [[item({ restartRequired: true })], { total: 1, success: 1, restartRequired: 1 }],
+      [[item({ restartRequired: true }), item({ restartRequired: true }), item({})], { total: 3, success: 3, restartRequired: 2 }],
+      [[item({ success: false, failed: true, stage: 'failed' })], { total: 1, failed: 1 }],
+      [[item({ success: false, cancelled: true, stage: 'cancelled' })], { total: 1, cancelled: 1, skipped: 1 }],
+      [[item({}), item({ success: false, stage: 'queued' })], { total: 2, success: 1 }],
+    ]
+    for (const [rows, summary] of combos) {
+      const result = tally(rows, summary)
+      ok(result.done <= result.total, `不变式 done ≤ total（${result.done}/${result.total}）`, result)
+    }
+  }
+}
+
+section('运行中隐藏中断区块 + missingFromProfile 标记')
+{
+  const info = loaded.exports.inspectable()
+  eq(typeof info.readInterrupted, 'function', 'inspectable 暴露 readInterrupted')
+  // readInterrupted：missingFromProfile 默认 false，显式 true 透传。
+  const readOne = info.readInterrupted?.([{ name: 'x', current: '1.0.0', target: '2.0.0', kind: 'npm' }])
+  eq(readOne?.[0]?.missingFromProfile, false, 'readInterrupted 对缺省 missingFromProfile 补 false', readOne?.[0])
+  const readMissing = info.readInterrupted?.([{ name: 'y', current: '1.0.0', target: '2.0.0', kind: 'npm', missingFromProfile: true }])
+  eq(readMissing?.[0]?.missingFromProfile, true, 'readInterrupted 透传 missingFromProfile=true', readMissing?.[0])
+
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
+  const t = ctx.locale.bind()
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+
+  const interruptedRows = [
+    { name: 'missing-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-missing', phase: 'removing', missingFromProfile: true },
+    { name: 'normal-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-normal', phase: 'installing', missingFromProfile: false },
+  ]
+  const runningState = {
+    ok: true,
+    running: true,
+    stopped: false,
+    finished: false,
+    summary: { total: 1, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 1 },
+    active: 'demo-plugin-a',
+    activeRequestId: 'req-1',
+    items: [{ name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'npm', requestId: 'req-1', stage: 'installing', success: false, failed: false, restartRequired: false, cancelled: false, error: null, restore: null }],
+    logs: [],
+  }
+  const finishedState = {
+    ok: true,
+    running: false,
+    stopped: false,
+    finished: true,
+    summary: { total: 1, success: 1, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 },
+    active: null,
+    activeRequestId: null,
+    items: [{ name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'npm', requestId: 'req-1', stage: 'done', success: true, failed: false, restartRequired: false, cancelled: false, error: null, restore: null }],
+    logs: [],
+  }
+
+  // GET /updates 的 running 随队列状态变化：先 true，结束后 false。
+  let queueRunning = true
+  loaded.state.intervals.length = 0
+  const bridge = makeBridge({
+    candidates: CANDIDATES,
+    running: () => queueRunning,
+    interrupted: () => interruptedRows,
+    stateFor: () => (queueRunning ? runningState : finishedState),
+  })
+  loaded.state.responses = (url, init) => bridge(url, init)
+  const view = render(tab.component, { t, openPackage: () => {} })
+  await settle(view)
+
+  // 运行中：中断区块必须不渲染（即使 GET /updates 带着 interrupted 数据）。
+  const duringText = view.texts().join(' | ')
+  ok(!duringText.includes('上次更新中断'), '运行中不渲染「上次更新中断」区块', duringText.slice(0, 300))
+  eq(view.elements().filter(hasClass('pmu-interrupted')).length, 0, '运行中没有 .pmu-interrupted 元素')
+  eq(view.elements().filter(hasClass('pmu-interruptedRow')).length, 0, '运行中没有中断行')
+
+  // 让轮询跑一次拿到 running 的进度项：进度显示出来，中断继续保持隐藏。
+  for (const interval of [...loaded.state.intervals.filter(fn => typeof fn === 'function')]) interval()
+  await settle(view)
+  const runState = view.elements().find(hasClass('pmu-runState'))
+  ok(runState !== undefined, '运行中显示更新状态区域（只显示进度）', view.texts().slice(0, 200))
+  eq(runState?.props?.['data-state'], 'running', '运行中状态区域 data-state=running')
+  ok(!view.texts().join(' | ').includes('上次更新中断'), '进度就绪后仍不渲染中断区块', view.texts().slice(0, 300))
+  eq(view.elements().filter(hasClass('pmu-interrupted')).length, 0, '进度就绪后仍无 .pmu-interrupted')
+
+  // 队列结束：running 变 false，finish → load(true) 重读 GET /updates，此时中断区块出现。
+  queueRunning = false
+  for (const interval of [...loaded.state.intervals.filter(fn => typeof fn === 'function')]) interval()
+  await settle(view, 80)
+  const afterText = view.texts().join(' | ')
+  ok(afterText.includes('上次更新中断'), '队列结束后才显示「上次更新中断」区块', afterText.slice(0, 400))
+  eq(view.elements().filter(hasClass('pmu-interruptedRow')).length, 2, '结束后显示两行残留')
+
+  // missingFromProfile 标记：只有 true 的行带徽标与更强提示。
+  const missingBadges = view.elements().filter(hasClass('pmu-missingBadge'))
+  eq(missingBadges.length, 1, '只有 missingFromProfile=true 的行带「已从 profile 依赖中移除」徽标', missingBadges.map(element => elementText(element)))
+  eq(elementText(missingBadges[0] ?? {}).trim(), '已从 profile 依赖中移除', '徽标文案正确')
+  eq(missingBadges[0]?.props?.['data-tone'], 'warn', '徽标是 warn 语气')
+  const missingHints = view.elements().filter(hasClass('pmu-missingHint'))
+  eq(missingHints.length, 1, '只有 missing 行带「需要重新安装」提示', missingHints.map(element => elementText(element)))
+  eq(elementText(missingHints[0] ?? {}).trim(), '需要重新安装', '提示文案正确')
+
+  // 徽标只出现在 missing-npm 那一行内。
+  const rows = view.elements().filter(hasClass('pmu-interruptedRow'))
+  const rowOf = (name) => rows.find(row => elementText(row).includes(name))
+  ok(collectElements(rowOf('missing-npm')).some(hasClass('pmu-missingBadge')), 'missing-npm 行内有徽标')
+  eq(collectElements(rowOf('normal-npm')).filter(hasClass('pmu-missingBadge')).length, 0, 'normal-npm 行内没有徽标')
+  ok(!elementText(rowOf('normal-npm') ?? {}).includes('需要重新安装'), 'normal-npm 行内没有「需要重新安装」')
+
+  // CSS：missing 徽标/提示用 warn token。
+  const css = latestCss(loaded.state)
+  ok(/\.pmu-missingHint\{[^}]*--dsw-alias-state-warn-primary/u.test(css), 'missingHint 用 warn 颜色', css.match(/\.pmu-missingHint\{[^}]*\}/u)?.[0])
+  eq(loaded.state.consoleErrors.length, 0, '运行中隐藏/缺失标记用例没有 console.error', loaded.state.consoleErrors)
+}
+
+section('空队列超时对账：前 8 次保留、第 9 次停止并清空')
+{
+  const info = loaded.exports.inspectable()
+  eq(info.emptyQueueLimit, 8, 'inspectable 暴露空队列上限 8')
+  eq(typeof info.nextEmptyQueueVerdict, 'function', 'inspectable 暴露 nextEmptyQueueVerdict（纯函数）')
+  if (typeof info.nextEmptyQueueVerdict === 'function') {
+    eq(info.nextEmptyQueueVerdict(0), { count: 1, lost: false }, '第 1 次空队列：不超时')
+    eq(info.nextEmptyQueueVerdict(7), { count: 8, lost: false }, '第 8 次空队列：不超时')
+    eq(info.nextEmptyQueueVerdict(8), { count: 9, lost: true }, '第 9 次空队列：判定丢失')
+    eq(info.nextEmptyQueueVerdict(undefined), { count: 1, lost: false }, '缺省计数按 0 起算')
+  }
+
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+  const runningState = {
+    ok: true,
+    running: true,
+    stopped: false,
+    finished: false,
+    summary: { total: 1, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 1 },
+    active: 'demo-plugin-a',
+    activeRequestId: 'req-1',
+    items: [{ name: 'demo-plugin-a', current: '1.2.0', latest: '1.4.2', version: '1.4.2', kind: 'npm', requestId: 'req-1', stage: 'installing', success: false, failed: false, restartRequired: false, cancelled: false, error: null, restore: null }],
+    logs: [],
+  }
+  const emptyState = { ok: true, running: false, stopped: false, finished: false, summary: { total: 0, success: 0, failed: 0, cancelled: 0 }, active: null, activeRequestId: null, items: [], logs: [] }
+
+  /**
+   * 用给定候选列表渲染一次，返回句柄。
+   * @param {object[]} candidates - GET /updates 的候选。
+   * @returns {Promise<{view: object, bridge: object, setEmpty: () => void, tick: () => Promise<void>}>} 句柄。
+   */
+  const setup = async (candidates) => {
+    const ctx = makePluginContext(loaded.state)
+    loaded.exports.apply(ctx)
+    loaded.state.intervals.length = 0
+    let mode = 'running'
+    const bridge = makeBridge({
+      candidates,
+      running: true,
+      stateFor: () => (mode === 'running' ? runningState : emptyState),
+    })
+    loaded.state.responses = (url, init) => bridge(url, init)
+    const view = render(tab.component, { t: ctx.locale.bind(), openPackage: () => {} })
+    await settle(view)
+    // 初始 load + 立刻 poll 已经拿到 runningState（progressItemsRef 有种子）。
+    const tick = async () => {
+      for (const interval of [...loaded.state.intervals.filter(fn => typeof fn === 'function')]) interval()
+      await settle(view)
+    }
+    return { view, bridge, setEmpty: () => { mode = 'empty' }, tick }
+  }
+
+  // A) 已装到目标（demo-plugin-a 不在候选里）→ 对账提示「已转由后台继续或已完成」。
+  const a = await setup(CANDIDATES.filter(candidate => candidate.name !== 'demo-plugin-a'))
+  const runStateA = a.view.elements().find(hasClass('pmu-runState'))
+  ok(runStateA !== undefined, '超时前有本地 running 进度', a.view.texts().slice(0, 200))
+  eq(runStateA?.props?.['data-state'], 'running', '超时前状态区域 data-state=running')
+
+  a.setEmpty()
+  for (let index = 1; index <= 8; index += 1) {
+    await a.tick()
+    const state = a.view.elements().find(hasClass('pmu-runState'))
+    ok(state !== undefined && state.props?.['data-state'] === 'running', `第 ${index} 次空队列仍保留原进度`, state?.props?.['data-state'])
+  }
+  // 第 8 次后打开弹窗确认阶段仍是原来的「安装」。
+  a.view.elements().find(hasClass('pmu-runState'))?.props?.onClick()
+  await settle(a.view)
+  const stageText = a.view.texts().join(' | ')
+  ok(stageText.includes('安装'), '第 8 次后进度阶段仍是原来的「安装」', stageText.slice(0, 300))
+  loaded.documentStub.dispatch('keydown', { key: 'Escape' })
+  await settle(a.view)
+
+  const stateCallsBefore = a.bridge.calls.filter(call => call.url === `${API}/updates/state`).length
+  await a.tick() // 第 9 次
+  const afterText = a.view.texts().join(' | ')
+  eq(a.view.elements().find(hasClass('pmu-runState')), undefined, '第 9 次后状态区域隐藏（progress 清空）')
+  eq(a.view.elements().filter(hasClass('pmu-progressItem')).length, 0, '第 9 次后进度项清空')
+  ok(afterText.includes('更新已转由后台继续或已完成，进度视图已重置'), '包已装到目标 → 显示「已转由后台继续或已完成」提示', afterText.slice(0, 400))
+  eq(a.view.elements().filter(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-progressModal')).length, 0, '超时后进度弹窗关闭')
+  // 轮询已停止：再 tick 不再请求 /updates/state。
+  const stateCallsAfter = a.bridge.calls.filter(call => call.url === `${API}/updates/state`).length
+  await a.tick()
+  eq(a.bridge.calls.filter(call => call.url === `${API}/updates/state`).length, stateCallsAfter, '超时后停止轮询（不再请求 /updates/state）', { stateCallsBefore, stateCallsAfter })
+
+  // 全程不发 cancel、不自动重启。
+  eq(a.bridge.calls.filter(call => call.url === `${API}/updates/cancel`).length, 0, '全程不发 POST /updates/cancel')
+  eq(a.bridge.calls.filter(call => call.method === 'POST').map(call => call.url).filter(url => !url.endsWith('/updates/check') && !url.endsWith('/updates/apply')), [], '没有其它写请求（不自动重启）')
+
+  // 超时后点「检查更新」可正常恢复：重新拉列表，再更新能重新种下进度。
+  findClickable(a.view, text => text.trim() === '检查更新')?.props.onClick()
+  await settle(a.view, 60)
+  ok(a.bridge.calls.some(call => call.url === `${API}/updates/check`), '超时后「检查更新」正常发起')
+  ok(!a.view.texts().join(' | ').includes('更新已转由后台继续或已完成'), '检查更新后对账提示消失', a.view.texts().slice(0, 300))
+  findClickable(a.view, text => text.trim() === '更新全部')?.props.onClick()
+  await settle(a.view)
+  findClickable(a.view, text => text.trim() === '开始更新')?.props.onClick()
+  await settle(a.view, 60)
+  ok(a.bridge.calls.some(call => call.url === `${API}/updates/apply`), '超时后仍可正常发起更新（apply）')
+  ok(a.view.elements().find(hasClass('pmu-runState')) !== undefined, '重新更新后状态区域恢复显示', a.view.texts().slice(0, 200))
+
+  // B) 仍可更新（demo-plugin-a 仍在候选里）→ 对账提示「进度已丢失，请重新检查」。
+  const b = await setup(CANDIDATES)
+  b.setEmpty()
+  for (let index = 1; index <= 8; index += 1) await b.tick()
+  await b.tick()
+  const bText = b.view.texts().join(' | ')
+  eq(b.view.elements().find(hasClass('pmu-runState')), undefined, '仍可更新：第 9 次后状态区域同样隐藏')
+  ok(bText.includes('更新进度已丢失，请重新检查更新后再试'), '包仍可更新 → 显示「更新进度已丢失」提示', bText.slice(0, 400))
+  ok(!bText.includes('更新已转由后台继续或已完成'), '仍可更新时不会误报「已完成」', bText.slice(0, 400))
+  eq(b.bridge.calls.filter(call => call.url === `${API}/updates/cancel`).length, 0, '仍可更新场景同样不发 cancel')
+
+  // C) 失败兜底：GET /updates 失败时按「仍可更新」处理（保守提示）。
+  eq(loaded.state.consoleErrors.length, 0, '空队列对账用例没有 console.error', loaded.state.consoleErrors)
+}
 
 // ---------------------------------------------------------------------------
 // 汇总

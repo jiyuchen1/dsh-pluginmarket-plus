@@ -35,6 +35,8 @@ window.__ModuleLoader__.load({
     const POLL_MS = 700
     /** 连续这么多次读不到进度就认定 Host 已退出/正在重启。 */
     const LOST_THRESHOLD = 3
+    /** 空队列保护的有界轮询次数：前 8 次保留本地进度（约 5.6s），第 9 次判定队列已丢失。 */
+    const EMPTY_QUEUE_LIMIT = 8
 
     const I18N = {
       zh: {
@@ -129,7 +131,6 @@ window.__ModuleLoader__.load({
         updatesLoading: '读取中…',
         updatesLoadFailed: '读取失败：{error}',
         updatesCheckFailed: '检查失败：{error}',
-        updatesCheckDone: '检查完成：可更新 {n} 项',
         updatesSettingsFailed: '保存设置失败：{error}',
         updatesUnknownVersion: '—',
         updatesExemptEntry: '版本豁免',
@@ -154,6 +155,9 @@ window.__ModuleLoader__.load({
         updatesConfirmNow: '开始更新',
         updatesConfirmClose: '关闭',
         updatesProgressTitle: '更新进度',
+        updatesRunStateRunning: '更新进行中，点击查看更新进度',
+        updatesRunStateDone: '更新完成，点击查看更新进度',
+        updatesRunStateCount: '{done}/{total}',
         updatesProgressOf: '第 {index}/{total} 项',
         updatesStage: '阶段',
         updatesLogToggle: 'pnpm 日志',
@@ -176,8 +180,12 @@ window.__ModuleLoader__.load({
         updatesAnotherRunning: '另一个更新正在进行，请稍后再试。',
         updatesStateLost: '进度状态读取失败（可重试）。',
         updatesHostLost: 'DSH 已退出或正在重启，请重新启动后继续。',
+        updatesProgressReconciled: '更新已转由后台继续或已完成，进度视图已重置；请查看插件详情确认版本。',
+        updatesProgressLost: '更新进度已丢失，请重新检查更新后再试。',
         updatesRestartNotice: '{n} 项已更新，重启 DSH 后生效。',
         updatesInterruptedTitle: '上次更新中断',
+        updatesMissingFromProfile: '已从 profile 依赖中移除',
+        updatesMissingFromProfileHint: '需要重新安装',
         updatesInterruptedLead: '{n} 项没装完。可以重新安装，或忽略这次记录。',
         updatesRecover: '重新安装',
         updatesRecovering: '正在重新安装…',
@@ -291,7 +299,6 @@ window.__ModuleLoader__.load({
         updatesLoading: 'Loading…',
         updatesLoadFailed: 'Failed to load: {error}',
         updatesCheckFailed: 'Check failed: {error}',
-        updatesCheckDone: 'Check finished: {n} updatable',
         updatesSettingsFailed: 'Could not save settings: {error}',
         updatesUnknownVersion: '—',
         updatesExemptEntry: 'Version exemption',
@@ -316,6 +323,9 @@ window.__ModuleLoader__.load({
         updatesConfirmNow: 'Start update',
         updatesConfirmClose: 'Close',
         updatesProgressTitle: 'Update progress',
+        updatesRunStateRunning: 'Updating — open update progress',
+        updatesRunStateDone: 'Update finished — open update progress',
+        updatesRunStateCount: '{done}/{total}',
         updatesProgressOf: 'Item {index}/{total}',
         updatesStage: 'Stage',
         updatesLogToggle: 'pnpm log',
@@ -338,8 +348,12 @@ window.__ModuleLoader__.load({
         updatesAnotherRunning: 'Another update is already running; try again shortly.',
         updatesStateLost: 'Could not read progress state (retryable).',
         updatesHostLost: 'DSH exited or is restarting. Restart it, then continue here.',
+        updatesProgressReconciled: 'The update continued in the background or already finished. The progress view was reset; check the plugin details to confirm the version.',
+        updatesProgressLost: 'Update progress was lost. Run "Check for updates" again.',
         updatesRestartNotice: '{n} updated. Restart DSH to apply.',
         updatesInterruptedTitle: 'Interrupted last time',
+        updatesMissingFromProfile: 'Removed from profile dependencies',
+        updatesMissingFromProfileHint: 'Reinstall required',
         updatesInterruptedLead: '{n} did not finish installing. Reinstall them, or ignore this record.',
         updatesRecover: 'Reinstall',
         updatesRecovering: 'Reinstalling…',
@@ -434,10 +448,23 @@ window.__ModuleLoader__.load({
       '.pmu-summaryText{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
       '.pmu-summaryActions{margin-left:auto;display:flex;align-items:center;gap:8px}',
       '.pmu-summaryTime{margin-left:auto;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);white-space:nowrap}',
+      // 工具条右侧的「更新状态」区域：更新中转圈、结束后绿色对勾；点击打开进度弹窗。
+      '.pmu-runState{display:inline-flex;align-items:center;gap:6px;flex:none;height:30px;padding:0 10px;border-radius:var(--dsw-radius-md);border:0.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font:inherit;font-size:12px;line-height:18px;cursor:pointer;white-space:nowrap}',
+      '.pmu-runState:hover{background:var(--dsw-alias-interactive-bg-hover)}',
+      '.pmu-runState:focus-visible{outline:var(--dsw-focus-ring-width,2px) solid var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));outline-offset:0}',
+      '.pmu-runIcon{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;flex:none;border-radius:999px}',
+      '.pmu-runState[data-state="running"] .pmu-runIcon{border:2px solid var(--dsw-alias-border-l3);border-top-color:var(--dsw-alias-state-business-primary);animation:pmu-spin .9s linear infinite}',
+      '.pmu-runState[data-state="done"] .pmu-runIcon{background:var(--dsw-alias-state-success-primary);color:var(--dsw-alias-label-on-color)}',
+      '.pmu-runCheck{display:block}',
+      '.pmu-runText{font-variant-numeric:tabular-nums}',
+      '@keyframes pmu-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}',
+      '@media (prefers-reduced-motion:reduce){.pmu-runState[data-state="running"] .pmu-runIcon{animation:none;border-top-color:var(--dsw-alias-border-l3);border-left-color:var(--dsw-alias-state-business-primary)}}',
+      '.pmu-progressModal{max-width:640px}',
       // 「上次更新中断」区块：列表上方，逐项一行。
       '.pmu-interrupted{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1)}',
       '.pmu-interruptedHead{display:flex;align-items:center;gap:10px;flex-wrap:wrap}',
-      '.pmu-interruptedRow{display:grid;grid-template-columns:minmax(0,1fr) 148px 56px minmax(0,auto) minmax(112px,auto);column-gap:10px;align-items:center;min-width:0;padding-top:8px;border-top:0.5px solid var(--dsw-alias-border-l2)}',
+      '.pmu-interruptedRow{display:grid;grid-template-columns:minmax(0,1fr) 148px 56px minmax(0,auto) minmax(0,auto) minmax(112px,auto);column-gap:10px;align-items:center;min-width:0;padding-top:8px;border-top:0.5px solid var(--dsw-alias-border-l2)}',
+      '.pmu-missingHint{font-size:12px;line-height:18px;color:var(--dsw-alias-state-warn-primary);white-space:nowrap}',
       '.pmu-interruptedName{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;line-height:20px;font-weight:600}',
       '@media (max-width:720px){.pmu-interruptedRow{grid-template-columns:minmax(0,1fr) 120px 48px minmax(0,auto) minmax(96px,auto);column-gap:6px}}',
       '.pmu-list{display:flex;flex-direction:column;gap:6px}',
@@ -954,6 +981,9 @@ window.__ModuleLoader__.load({
         readSettings,
         mergeSettings,
         nextPollFailure,
+        progressTally,
+        nextEmptyQueueVerdict,
+        emptyQueueLimit: EMPTY_QUEUE_LIMIT,
         readInterrupted,
         readRecoverResults,
         lostThreshold: LOST_THRESHOLD,
@@ -1381,9 +1411,20 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 空队列保护的计数：本地进度在跑但 Host 反复返回空队列时，前 EMPTY_QUEUE_LIMIT 次继续保留，
+     * 第 EMPTY_QUEUE_LIMIT + 1 次起判定「队列已丢失/由后台继续」，需要停止轮询并对账。
+     * @param {number} previous - 之前的连续空队列次数。
+     * @returns {{count: number, lost: boolean}} 新的计数与是否超时。
+     */
+    function nextEmptyQueueVerdict(previous) {
+      const count = (Number.isFinite(previous) ? Math.max(0, Math.floor(previous)) : 0) + 1
+      return { count, lost: count > EMPTY_QUEUE_LIMIT }
+    }
+
+    /**
      * 归一 GET /updates 的 `interrupted`（Host：`{name,current,target,kind,requestId,phase,startedAt,spec?}`）。
      * @param {unknown} value - 响应里的 interrupted。
-     * @returns {Array<{name: string, current: string, target: string, kind: string, spec: string, phase: string}>} 记录。
+     * @returns {Array<{name: string, current: string, target: string, kind: string, spec: string, phase: string, missingFromProfile: boolean}>} 记录。
      */
     function readInterrupted(value) {
       return list(value)
@@ -1398,6 +1439,8 @@ window.__ModuleLoader__.load({
             kind: text(raw.kind) === 'git' ? 'git' : 'npm',
             spec: text(raw.spec),
             phase: text(raw.phase) || text(raw.stage),
+            // Host 的 t39 契约：该包已不在 profile 依赖里（已从依赖删除但没装回）。
+            missingFromProfile: raw.missingFromProfile === true,
           }
         })
         .filter(Boolean)
@@ -1541,6 +1584,27 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 状态区域的「已完成数 / 队列总数」。
+     *
+     * 关键点：Host 的 summary 里「需重启」项**同时**计入 `success` 与 `restartRequired`
+     * （lib/updates.js：`success: success || restartRequired`），所以绝不能把
+     * success + failed + restart + skipped 相加 —— 需重启项会被计两次（2 项队列显示 3/3）。
+     * 这里直接按队列项去重计数：终态项（success/failed/cancelled/restartRequired/终态 stage）各算一次。
+     * @param {object[]} items - 进度项。
+     * @param {object} [summary] - Host 的 summary（仅在还没有 items 时兜底总数）。
+     * @returns {{done: number, total: number}} 计数。
+     */
+    function progressTally(items, summary) {
+      const rows = list(items)
+      // 终态项各算一次：restartRequired 项虽然同时是 success，但只会被数到一次。
+      const done = rows.filter(progressTerminal).length
+      // 总数取「队列项数」与 Host summary.total 的较大者：done ≤ rows.length 恒成立，
+      // 所以这里取 max 不会把 done 撑大（旧实现撑大的是 done 本身）。
+      const total = Math.max(done, rows.length, num(rec(summary).total, 0))
+      return { done, total }
+    }
+
+    /**
      * 「筛选」下拉里的一行开关（文案也可点）。
      * @param {object} props - 组件属性。
      * @returns {object} React 元素。
@@ -1630,7 +1694,7 @@ window.__ModuleLoader__.load({
      * @param {object} props - 组件属性。
      * @returns {object} React 元素。
      */
-    function UpdatesModal({ title, onClose, children }) {
+    function UpdatesModal({ title, onClose, children, panelClass }) {
       React.useEffect(() => {
         /**
          * @param {object} event - 键盘事件。
@@ -1644,7 +1708,7 @@ window.__ModuleLoader__.load({
           return undefined
         }
       }, [onClose])
-      const panel = h('div', { className: 'pmu-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title, onClick: (event) => { event.stopPropagation() } },
+      const panel = h('div', { className: panelClass === undefined ? 'pmu-modal' : `pmu-modal ${panelClass}`, role: 'dialog', 'aria-modal': 'true', 'aria-label': title, onClick: (event) => { event.stopPropagation() } },
         h('h3', { className: 'pmu-modalTitle' }, title),
         children)
       return h('div', { className: 'pmu-modalLayer', onClick: onClose }, panel)
@@ -1784,6 +1848,7 @@ window.__ModuleLoader__.load({
       const [progress, setProgress] = React.useState(null)
       const [cancelling, setCancelling] = React.useState(false)
       const [hostLost, setHostLost] = React.useState(false)
+      const [progressOpen, setProgressOpen] = React.useState(false)
       const [interrupted, setInterrupted] = React.useState([])
       const [recovering, setRecovering] = React.useState('')
       const [recoverErrors, setRecoverErrors] = React.useState({})
@@ -1793,6 +1858,9 @@ window.__ModuleLoader__.load({
       const alive = React.useRef(true)
       const pollRef = React.useRef(null)
       const pollFailuresRef = React.useRef(0)
+      const progressItemsRef = React.useRef([])
+      const progressRunningRef = React.useRef(false)
+      const emptyQueueRef = React.useRef(0)
       const requestRef = React.useRef('')
       const selectAllRef = React.useRef(null)
       const settingsRef = React.useRef(null)
@@ -1842,13 +1910,16 @@ window.__ModuleLoader__.load({
           if (body.running === true && skipResume !== true) {
             // 打开页面时已有队列在跑：接上进度，不再自己入队。
             setNotice({ tone: 'warn', text: tRef.current('updatesRunningElsewhere') })
+            progressRunningRef.current = true
             setProgress({ requestId: '', status: 'running', running: true, summary: {}, items: [] })
             if (typeof startPollingRef.current === 'function') startPollingRef.current()
           }
+          return body
         } catch (failure) {
-          if (!alive.current) return
+          if (!alive.current) return null
           setLoadError(String(failure?.message ?? failure))
           setLoaded(true)
+          return null
         }
       }, [])
 
@@ -1910,6 +1981,31 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
+      /**
+       * 空队列超时后的对账：停止轮询、清空进度，重新拉 GET /updates，按「是否仍可更新」给不同提示。
+       * @param {string[]} names - 超时前本地进度里的包名。
+       * @returns {Promise<void>} 完成。
+       */
+      const reconcileLostQueue = React.useCallback(async (names) => {
+        stopPolling()
+        setCancelling(false)
+        setProgress(null)
+        setProgressOpen(false)
+        setOpenLogs({})
+        emptyQueueRef.current = 0
+        const body = await load(true)
+        if (!alive.current) return
+        const fresh = body === null ? null : list(body.candidates ?? body.updates ?? body.items).map(toRow).filter(Boolean)
+        const stillUpdatable = fresh === null
+          ? true
+          : fresh.some(row => names.includes(row.name) && ['updatable', 'skipped', 'incompatible'].includes(row.state))
+        // 已装到目标（不在可更新列表）→ 视为完成；仍可更新 → 说明更新没完成，需要重新检查。
+        setNotice({
+          tone: stillUpdatable ? 'error' : 'warn',
+          text: t(stillUpdatable ? 'updatesProgressLost' : 'updatesProgressReconciled'),
+        })
+      }, [load, stopPolling, t])
+
       const poll = React.useCallback(async () => {
         try {
           const payload = await getJson(`${UPDATES_API}/state`)
@@ -1918,6 +2014,21 @@ window.__ModuleLoader__.load({
           setHostLost(false)
           const body = rec(payload)
           const current = readProgress(body)
+          // Host 还没把队列报出来（刚入队 / 刚切回）时，保留本地已有的进度，避免被空状态清空。
+          // 判定依据：Host 一个条目都没有、summary.total 也是 0、也还没结束 —— 说明它还没接上这次队列。
+          // 有界保护：最多保留 EMPTY_QUEUE_LIMIT 次；超过则判定队列已丢失（典型：Host 被 HMR 重载），
+          // 停止轮询、清空进度并重新对账，避免界面永久卡在旧阶段。
+          if (current.items.length === 0 && num(current.summary.total, 0) === 0 && current.status !== 'done'
+            && (progressItemsRef.current.length > 0 || progressRunningRef.current === true)) {
+            const verdict = nextEmptyQueueVerdict(emptyQueueRef.current)
+            emptyQueueRef.current = verdict.count
+            if (verdict.lost) {
+              const names = progressItemsRef.current.map(item => item.name)
+              void reconcileLostQueue(names)
+            }
+            return
+          }
+          emptyQueueRef.current = 0
           const items = mergeStages(current.items)
           setProgress({
             requestId: current.requestId === '' ? requestRef.current : current.requestId,
@@ -1950,6 +2061,7 @@ window.__ModuleLoader__.load({
       const startPolling = React.useCallback(() => {
         stopPolling()
         pollFailuresRef.current = 0
+        emptyQueueRef.current = 0
         setHostLost(false)
         pollRef.current = setInterval(() => { void poll() }, POLL_MS)
         void poll()
@@ -2003,7 +2115,8 @@ window.__ModuleLoader__.load({
           for (const row of candidates) {
             if (autoSelectable(row, settings)) updatable += 1
           }
-          setNotice({ tone: 'ok', text: t('updatesCheckDone', { n: updatable }) })
+          // 检查成功不再弹「检查完成：可更新 N 项」提示条；列表本身就是结果。
+          setNotice(null)
         } catch (failure) {
           if (alive.current) setNotice({ tone: 'error', text: t('updatesCheckFailed', { error: String(failure?.message ?? failure) }) })
         } finally {
@@ -2083,15 +2196,19 @@ window.__ModuleLoader__.load({
           const ack = applyAck(payload)
           if (!ack.ok) throw new Error(ack.message === '' ? t('updatesAnotherRunning') : ack.message)
           requestRef.current = ack.requestId
+          const seeded = items.map(row => ({
+            key: `${row.name}@0`, name: row.name, from: row.current, to: row.latest, stage: 'pending',
+            success: false, failed: false, error: '', restore: null, restartRequired: false, log: '', stages: [],
+          }))
+          // 立刻记下种子条目：紧接着的第一次轮询若 Host 还没接上，也不能把它清空。
+          progressItemsRef.current = seeded
+          progressRunningRef.current = true
           setProgress({
             requestId: ack.requestId,
             status: 'running',
             running: true,
             summary: {},
-            items: items.map(row => ({
-              key: `${row.name}@0`, name: row.name, from: row.current, to: row.latest, stage: 'pending',
-              success: false, failed: false, error: '', restore: null, restartRequired: false, log: '', stages: [],
-            })),
+            items: seeded,
           })
           stagesRef.current = {}
           startPolling()
@@ -2262,7 +2379,24 @@ window.__ModuleLoader__.load({
       }
 
       const progressItems = progress?.items ?? []
+      progressItemsRef.current = progressItems
+      progressRunningRef.current = progress !== null && (progress.running === true || progress.status === 'running')
       const progressReady = progressItems.length > 0 && progressItems.every(progressTerminal)
+      const progressRunning = progress !== null && (progress.running === true || progress.status === 'running')
+      // 队列运行中绝不渲染「上次更新中断」：切走再切回时 GET /updates 可能还带着旧残留，
+      // 先按 running 只显示进度，等队列结束后再按新的 GET /updates 决定是否显示。
+      const interruptedVisible = interrupted.length > 0 && progressRunning !== true
+      const progressCounts = readSummary(progress?.summary ?? {}) ?? {
+        success: progressItems.filter(item => item.success === true || item.restartRequired === true).length,
+        failed: progressItems.filter(item => item.failed === true).length,
+        restart: progressItems.filter(item => item.restartRequired === true).length,
+        skipped: progressItems.filter(item => item.cancelled === true).length,
+      }
+      // 「已完成数 / 队列总数」按终态项去重计数（summary 的 success 已含 restartRequired，
+      // 不能与 restart 相加，否则需重启项会被计两次）。
+      const progressTallyOf = progressTally(progressItems, progress?.summary ?? {})
+      const progressDone = progressTallyOf.done
+      const progressTotal = progressTallyOf.total
       const openConfirm = (target) => { setConfirm(target); setExemptAck({}); setConfirmSecond(null) }
 
       return h('div', { className: 'pmu-root' },
@@ -2319,12 +2453,33 @@ window.__ModuleLoader__.load({
             onChange: (next) => { toggleSetting('includeDisabled', next) },
           }))),
           h('button', { type: 'button', className: 'pmp-btn', disabled: busy !== '' || installable.length === 0, onClick: () => { openConfirm({ rows: installable }) } }, t('updatesUpdateAll')),
-          h('button', { type: 'button', className: 'pmp-btn', disabled: busy !== '' || selectedCount === 0, onClick: () => { openConfirm({ rows: selectedRows }) } }, t('updatesUpdateSelected'))),
+          h('button', { type: 'button', className: 'pmp-btn', disabled: busy !== '' || selectedCount === 0, onClick: () => { openConfirm({ rows: selectedRows }) } }, t('updatesUpdateSelected')),
+          // 更新状态：有队列时才出现；点开「更新进度」弹窗（关闭弹窗不中断队列）。
+          progress !== null && progressTotal > 0 && h('button', {
+            type: 'button', className: 'pmu-runState',
+            'data-state': progressRunning ? 'running' : 'done',
+            'aria-label': progressRunning ? t('updatesRunStateRunning') : t('updatesRunStateDone'),
+            title: progressRunning ? t('updatesRunStateRunning') : t('updatesRunStateDone'),
+            'aria-haspopup': 'dialog',
+            onClick: () => { setProgressOpen(true) },
+          },
+          h('span', { className: 'pmu-runIcon', 'aria-hidden': 'true' },
+            progressRunning ? null : h('svg', {
+              className: 'pmu-runCheck', viewBox: '0 0 24 24', width: '9', height: '9',
+              fill: 'none', stroke: 'currentColor', 'stroke-width': '3.4',
+              'stroke-linecap': 'round', 'stroke-linejoin': 'round',
+            }, h('path', { d: 'M4 12.5l5 5L20 6.5' }))),
+          h('span', { className: 'pmu-runText' }, t('updatesRunStateCount', { done: progressDone, total: progressTotal })))),
 
         notice !== null && h('p', { className: 'pmu-notice', 'data-tone': notice.tone }, notice.text),
+        hostLost && h('p', { className: 'pmu-notice pmu-lost', 'data-tone': 'warn' }, t('updatesHostLost')),
+        // 队列结束且有需重启项：弹窗关着时也在页面上提醒（弹窗内同样有）。
+        progress !== null && progressOpen !== true && progressReady && progressCounts.restart > 0
+          && h('p', { className: 'pmu-notice pmu-restartNotice', 'data-tone': 'warn' }, t('updatesRestartNotice', { n: progressCounts.restart })),
 
         // 上次更新中断（Host 的 GET /updates.interrupted）：逐项重装或整批忽略。
-        interrupted.length > 0 && h('div', { className: 'pmu-interrupted', role: 'group', 'aria-label': t('updatesInterruptedTitle') },
+        // 队列运行中一律不显示（见 interruptedVisible）。
+        interruptedVisible && h('div', { className: 'pmu-interrupted', role: 'group', 'aria-label': t('updatesInterruptedTitle') },
           h('div', { className: 'pmu-interruptedHead' },
             h('h3', { className: 'pmu-title' }, t('updatesInterruptedTitle')),
             h('span', { className: 'pmu-summaryText' }, t('updatesInterruptedLead', { n: interrupted.length })),
@@ -2343,6 +2498,8 @@ window.__ModuleLoader__.load({
             h('span', { className: 'pmu-interruptedName', title: item.name }, item.name),
             h('span', { className: 'pmu-versions' }, `${item.current === '' ? t('updatesUnknownVersion') : item.current} → ${item.target === '' ? t('updatesUnknownVersion') : item.target}`),
             h('span', { className: 'pmp-badge' }, item.kind === 'git' ? t('updatesKindGit') : t('updatesKindNpm')),
+            item.missingFromProfile === true && h('span', { className: 'pmp-badge pmu-missingBadge', 'data-tone': 'warn' }, t('updatesMissingFromProfile')),
+            item.missingFromProfile === true && h('span', { className: 'pmu-missingHint' }, t('updatesMissingFromProfileHint')),
             recoverErrors[item.name] !== undefined && h('span', { className: 'pmu-error' }, t('updatesRecoverItemFailed', { error: recoverErrors[item.name] })),
             h('span', { className: 'pmu-summaryActions' },
               h('button', {
@@ -2352,7 +2509,13 @@ window.__ModuleLoader__.load({
               }, recovering === item.name ? t('updatesRecovering') : t('updatesRecover')))))),
         loadError !== '' && h('p', { className: 'pmu-error' }, t('updatesLoadFailed', { error: loadError })),
 
-        progress !== null && h(UpdatesProgress, {
+        // 更新进度整体在弹窗里（由工具条的状态区域点开）；这里不再内联渲染。
+        progressOpen && progress !== null && h(UpdatesModal, {
+          title: t('updatesProgressTitle'),
+          panelClass: 'pmu-progressModal',
+          onClose: () => { setProgressOpen(false) },
+        },
+        h(UpdatesProgress, {
           items: progressItems,
           status: progress.status,
           summary: progress.summary,
@@ -2363,8 +2526,9 @@ window.__ModuleLoader__.load({
           t,
           onToggleLog: toggleLog,
           onCancel: () => { void cancelCurrent() },
-          onClose: () => { setProgress(null); setOpenLogs({}); setStagesRefSafe() },
-        }),
+          // 弹窗里的「完成」只关闭弹窗：状态区域（绿色对勾 + 计数）保留到下一次更新或页面刷新。
+          onClose: () => { setProgressOpen(false) },
+        })),
 
         // 统计条
         h('div', { className: 'pmu-summary' },

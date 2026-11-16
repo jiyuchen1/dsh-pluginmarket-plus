@@ -248,7 +248,7 @@ function bundle(patch) {
  * @returns {object} 假服务。
  */
 function makePluginManager(bundles, options = {}) {
-  const calls = { listBundles: 0, listVersions: [], updateBundle: [], cancelInstall: [], waitForInstall: [], setVersionExemption: [], installBundle: [] }
+  const calls = { listBundles: 0, listVersions: [], updateBundle: [], cancelInstall: [], waitForInstall: [], setVersionExemption: [], installBundle: [], removeBundle: [] }
   const versionLists = options.versionsBy ?? {}
   let bundleCursor = 0
   return {
@@ -278,6 +278,13 @@ function makePluginManager(bundles, options = {}) {
       if (typeof outcome === 'function') return outcome(spec)
       if (outcome !== undefined) return outcome
       return { changed: true, application: 'applied', stage: 'install', target: spec }
+    },
+    async removeBundle(name) {
+      calls.removeBundle.push(name)
+      const outcome = options.removeOutcomes?.[name]
+      if (typeof outcome === 'function') return outcome(name)
+      if (outcome !== undefined) return outcome
+      return { changed: true, application: 'applied', stage: 'remove', target: name }
     },
     async cancelInstall(requestId) {
       calls.cancelInstall.push(requestId)
@@ -463,6 +470,8 @@ async function boot(options = {}) {
   }
 
   const plugin = await import('../lib/index.js')
+  // 可选：在插件 apply 之前准备 profile 目录（例如预写 package.json / 中断日志，验证启动路径）。
+  if (typeof options.prepare === 'function') await options.prepare(profileDir)
   plugin.apply(ctx, config)
 
   /**
@@ -1204,6 +1213,359 @@ section('中断恢复：interrupted / recover / clear-interrupted')
   busyApp.dispose()
   cleanApp.dispose()
   for (const handle of [app, busyApp, cleanApp]) rmSync(handle.profileDir, { recursive: true, force: true })
+}
+
+section('运行中排除中断项 / phase 写回 / missingFromProfile')
+{
+  /**
+   * 往 profile 写 package.json 的 dependencies。
+   * @param {object} app - boot 句柄。
+   * @param {string[]} names - 依赖包名。
+   * @returns {void}
+   */
+  const writeDeps = (app, names) => {
+    writeFileSync(join(app.profileDir, 'package.json'), JSON.stringify({ name: 'fake-profile', dependencies: Object.fromEntries(names.map(name => [name, '1.0.0'])) }, null, 2), 'utf8')
+  }
+  /**
+   * 往缓存目录写中断日志。
+   * @param {object} app - boot 句柄。
+   * @param {object[]} items - 记录。
+   * @returns {void}
+   */
+  const writeInflight = (app, items) => {
+    mkdirSync(app.cacheDir, { recursive: true })
+    writeFileSync(join(app.cacheDir, 'updates-inflight.json'), JSON.stringify({ version: 1, items }, null, 2), 'utf8')
+  }
+  /**
+   * 读回中断日志。
+   * @param {object} app - boot 句柄。
+   * @returns {object[]} items。
+   */
+  const readInflight = (app) => {
+    const path = join(app.cacheDir, 'updates-inflight.json')
+    if (!existsSync(path)) return []
+    return JSON.parse(readFileSync(path, 'utf8')).items ?? []
+  }
+
+  // A) 运行中的队列项不出现在 interrupted；残留项带 missingFromProfile。
+  const bundles = [
+    bundle({ name: 'run-npm', source: 'run-npm@1.0.0', update: 'registry' }),
+    bundle({ name: 'kept-npm', version: '1.0.0', source: 'kept-npm@1.0.0', update: 'registry' }),
+  ]
+  const app = await boot({
+    bundles,
+    manager: makePluginManager(bundles, { delayMs: 400 }),
+    prepare: (profileDir) => {
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'fake-profile', dependencies: { 'run-npm': '1.0.0', 'kept-npm': '1.0.0' } }, null, 2), 'utf8')
+      const cacheDir = join(profileDir, '.pluginmarket-plus')
+      mkdirSync(cacheDir, { recursive: true })
+      writeFileSync(join(cacheDir, 'updates-inflight.json'), JSON.stringify({
+        version: 1,
+        items: [
+          { name: 'run-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-run', phase: 'removing', startedAt: 1_700_000_000_000 },
+          { name: 'stale-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-stale', phase: 'installing', startedAt: 1_700_000_001_000 },
+          { name: 'kept-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-kept', phase: 'checking', startedAt: 1_700_000_002_000 },
+        ],
+      }, null, 2), 'utf8')
+    },
+  })
+
+  // 启动时（无队列）三条都可见，missingFromProfile 按 profile 依赖标记。
+  const idle = await app.call(`${API}/updates`)
+  const idleByName = new Map(idle.body.interrupted.map(record => [record.name, record]))
+  eq(idle.body.interrupted.map(record => record.name), ['run-npm', 'stale-npm', 'kept-npm'], '无队列时三条残留都可见')
+  eq(idleByName.get('stale-npm')?.missingFromProfile, true, '不在 profile 依赖里的包标 missingFromProfile=true')
+  eq(idleByName.get('run-npm')?.missingFromProfile, false, '在 profile 依赖里的包标 missingFromProfile=false')
+  eq(idleByName.get('kept-npm')?.missingFromProfile, false, '在 profile 依赖里的包标 missingFromProfile=false（第二条）')
+
+  // 启动 warn：明确提示「已移除但未装回」的残留。
+  ok(app.warnLines.some(line => String(line).includes('stale-npm')), '启动时对不在 profile 依赖的残留给出 warn', app.warnLines)
+
+  // 启动一个慢队列（run-npm），运行中 GET /updates 应过滤掉正在跑的项。
+  await app.call(`${API}/updates/check`, { body: {} })
+  const applied = await app.call(`${API}/updates/apply`, { body: { items: [{ name: 'run-npm' }] } })
+  eq(applied.status, 200, 'apply 启动慢队列 200')
+  const runRequestId = applied.body.items[0].requestId
+  const during = await app.call(`${API}/updates`)
+  const duringNames = during.body.interrupted.map(record => record.name)
+  ok(!duringNames.includes('run-npm'), '运行中的队列项不出现在 interrupted（按 name 过滤）', duringNames)
+  eq(duringNames, ['stale-npm', 'kept-npm'], '其它残留仍正常展示', duringNames)
+
+  // 阶段推进：update-state 事件把 inflight 文件的 phase 写回 removing / installing。
+  app.ctx.emit('plugin-manager/update-state', { requestId: runRequestId, step: 'removing' })
+  eq(readInflight(app).find(record => record.name === 'run-npm')?.phase, 'removing', 'removing 阶段写回 inflight 文件')
+  app.ctx.emit('plugin-manager/update-state', { requestId: runRequestId, step: 'installing' })
+  eq(readInflight(app).find(record => record.name === 'run-npm')?.phase, 'installing', 'installing 阶段写回 inflight 文件')
+
+  // 队列结束：run-npm 的记录被清掉，剩下的残留照常展示。
+  await waitFor(async () => (await app.call(`${API}/updates/state`)).body.finished === true, '慢队列跑完')
+  const after = await app.call(`${API}/updates`)
+  eq(after.body.interrupted.map(record => record.name), ['stale-npm', 'kept-npm'], '队列结束后只保留真正的残留')
+  eq(readInflight(app).some(record => record.name === 'run-npm'), false, '结束后运行项的记录已从文件移除')
+
+  // B) recover 兜底：包不在 profile 依赖 + 首次 install 失败 → removeBundle 清残留 → 再装一次成功。
+  const fallbackApp = await boot({
+    bundles: [bundle({ name: 'gone-npm', source: 'gone-npm@1.0.0', update: 'registry' })],
+    manager: (() => {
+      let attempts = 0
+      return makePluginManager([bundle({ name: 'gone-npm', source: 'gone-npm@1.0.0', update: 'registry' })], {
+        installOutcomes: {
+          'gone-npm@2.0.0': () => {
+            attempts += 1
+            if (attempts === 1) return { changed: false, application: 'failed', error: { code: 'install-failed', diagnostic: '包未在依赖中，无法原地升级' } }
+            return { changed: true, application: 'applied', stage: 'install', target: 'gone-npm@2.0.0' }
+          },
+        },
+        removeOutcomes: { 'gone-npm': { changed: true, application: 'applied', stage: 'remove', target: 'gone-npm' } },
+      })
+    })(),
+    prepare: (profileDir) => {
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'fake-profile', dependencies: {} }, null, 2), 'utf8')
+      const cacheDir = join(profileDir, '.pluginmarket-plus')
+      mkdirSync(cacheDir, { recursive: true })
+      writeFileSync(join(cacheDir, 'updates-inflight.json'), JSON.stringify({ version: 1, items: [{ name: 'gone-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-gone', phase: 'removing', startedAt: 1_700_000_003_000 }] }, null, 2), 'utf8')
+    },
+  })
+  const fallback = await fallbackApp.call(`${API}/updates/recover`, { body: {} })
+  eq(fallback.status, 200, 'recover 兜底场景 200')
+  const fallbackResult = fallback.body.results[0]
+  eq(fallbackResult?.ok, true, '依赖缺失时兜底重装成功')
+  eq(fallbackResult?.steps?.map(step => step.step), ['install', 'remove', 'reinstall'], 'steps 记录 install → remove → reinstall 三步', fallbackResult?.steps)
+  eq(fallbackResult?.steps?.[0]?.ok, false, '首次 install 失败（带原因）', fallbackResult?.steps?.[0])
+  eq(fallbackResult?.steps?.[1]?.ok, true, 'removeBundle 清残留成功', fallbackResult?.steps?.[1])
+  eq(fallbackResult?.steps?.[2]?.ok, true, '二次 install 成功', fallbackResult?.steps?.[2])
+  eq(fallbackApp.manager.calls.removeBundle, ['gone-npm'], '兜底时调用 removeBundle(包名)')
+  eq(fallbackApp.manager.calls.installBundle.filter(spec => spec === 'gone-npm@2.0.0').length, 2, 'installBundle 被调用两次（首次失败 + 兜底重装）')
+  eq(readInflight(fallbackApp), [], '兜底成功后残留记录被清空')
+
+  // C) 包在 profile 依赖里时，install 失败不触发兜底（不会误删依赖）。
+  let attemptsC = 0
+  const keptManager = makePluginManager([bundle({ name: 'keep-npm', source: 'keep-npm@1.0.0', update: 'registry' })], {
+    installOutcomes: { 'keep-npm@2.0.0': () => { attemptsC += 1; return { changed: false, application: 'failed', error: { code: 'install-failed', diagnostic: '版本冲突' } } } },
+  })
+  const keptApp = await boot({
+    bundles: [bundle({ name: 'keep-npm', source: 'keep-npm@1.0.0', update: 'registry' })],
+    manager: keptManager,
+    prepare: (profileDir) => {
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'fake-profile', dependencies: { 'keep-npm': '1.0.0' } }, null, 2), 'utf8')
+      const cacheDir = join(profileDir, '.pluginmarket-plus')
+      mkdirSync(cacheDir, { recursive: true })
+      writeFileSync(join(cacheDir, 'updates-inflight.json'), JSON.stringify({ version: 1, items: [{ name: 'keep-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-keep', phase: 'installing', startedAt: 1_700_000_004_000 }] }, null, 2), 'utf8')
+    },
+  })
+  const kept = await keptApp.call(`${API}/updates/recover`, { body: {} })
+  eq(kept.body.results[0]?.ok, false, '依赖仍在时 install 失败 → recover 失败')
+  eq(kept.body.results[0]?.steps, undefined, '依赖仍在时不走兜底（没有 steps，即只有一次 install）', kept.body.results[0]?.steps)
+  eq(kept.body.results[0]?.error, '版本冲突', '失败原因仍是首次 install 的 diagnostic', kept.body.results[0])
+  eq(keptManager.calls.removeBundle, [], '依赖仍在时不调用 removeBundle')
+  eq(readInflight(keptApp).map(record => record.name), ['keep-npm'], '失败项保留在中断日志里')
+
+  // D) 兜底也失败：steps 保留每一步原因，记录仍在。
+  let attemptsD = 0
+  const badManager = makePluginManager([bundle({ name: 'bad-npm', source: 'bad-npm@1.0.0', update: 'registry' })], {
+    installOutcomes: { 'bad-npm@2.0.0': () => { attemptsD += 1; return { changed: false, application: 'failed', error: { code: 'install-failed', diagnostic: `第 ${attemptsD} 次失败` } } } },
+    removeOutcomes: { 'bad-npm': { changed: false, application: 'failed', error: { code: 'remove-failed', diagnostic: '删不掉' } } },
+  })
+  const badApp = await boot({
+    bundles: [bundle({ name: 'bad-npm', source: 'bad-npm@1.0.0', update: 'registry' })],
+    manager: badManager,
+    prepare: (profileDir) => {
+      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'fake-profile', dependencies: {} }, null, 2), 'utf8')
+      const cacheDir = join(profileDir, '.pluginmarket-plus')
+      mkdirSync(cacheDir, { recursive: true })
+      writeFileSync(join(cacheDir, 'updates-inflight.json'), JSON.stringify({ version: 1, items: [{ name: 'bad-npm', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-bad', phase: 'removing', startedAt: 1_700_000_005_000 }] }, null, 2), 'utf8')
+    },
+  })
+  const bad = await badApp.call(`${API}/updates/recover`, { body: {} })
+  eq(bad.body.results[0]?.ok, false, '兜底也失败时 recover 报失败')
+  eq(bad.body.results[0]?.steps?.map(step => step.step), ['install', 'remove', 'reinstall'], '失败路径同样返回三步')
+  eq(bad.body.results[0]?.steps?.[1]?.error, '删不掉', 'remove 失败原因带在 steps 里', bad.body.results[0]?.steps?.[1])
+  eq(bad.body.results[0]?.steps?.[2]?.error, '第 2 次失败', 'reinstall 失败原因带在 steps 里', bad.body.results[0]?.steps?.[2])
+  eq(readInflight(badApp).map(record => record.name), ['bad-npm'], '兜底失败后记录保留')
+
+  for (const handle of [app, fallbackApp, keptApp, badApp]) {
+    handle.dispose()
+    rmSync(handle.profileDir, { recursive: true, force: true })
+  }
+}
+
+section('中断记录自动核对：已装到目标/更高清掉，低于目标/缺失/失败保留')
+{
+  /**
+   * 往 profile 写包依赖清单。
+   * @param {string} profileDir - profile 目录。
+   * @param {string[]} names - 依赖包名。
+   * @returns {void}
+   */
+  const writeDeps = (profileDir, names) => {
+    writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ name: 'fake-profile', dependencies: Object.fromEntries(names.map(name => [name, '1.0.0'])) }, null, 2), 'utf8')
+  }
+  /**
+   * 往缓存目录写中断日志。
+   * @param {string} profileDir - profile 目录。
+   * @param {object[]} items - 记录。
+   * @returns {void}
+   */
+  const writeInflightAt = (profileDir, items) => {
+    const cacheDir = join(profileDir, '.pluginmarket-plus')
+    mkdirSync(cacheDir, { recursive: true })
+    writeFileSync(join(cacheDir, 'updates-inflight.json'), JSON.stringify({ version: 1, items }, null, 2), 'utf8')
+  }
+  /**
+   * 读回中断日志的原始文本（不存在返回 null）。
+   * @param {string} profileDir - profile 目录。
+   * @returns {string|null} 文本。
+   */
+  const rawInflight = (profileDir) => {
+    const path = join(profileDir, '.pluginmarket-plus', 'updates-inflight.json')
+    return existsSync(path) ? readFileSync(path, 'utf8') : null
+  }
+  /**
+   * 读回中断日志的 items（不存在返回 null）。
+   * @param {string} profileDir - profile 目录。
+   * @returns {object[]|null} items。
+   */
+  const itemsInflight = (profileDir) => {
+    const raw = rawInflight(profileDir)
+    return raw === null ? null : JSON.parse(raw).items
+  }
+  const npmRecord = (name, target) => ({ name, current: '1.0.0', target, kind: 'npm', requestId: `req-${name}`, phase: 'installing', startedAt: 1_700_000_000_000 })
+
+  // A) 已装到 target：GET /updates 后从文件移除、interrupted 为空。
+  const doneApp = await boot({
+    bundles: [bundle({ name: 'done-npm', version: '2.0.0', source: 'done-npm@2.0.0', update: 'registry' })],
+    manager: makePluginManager([bundle({ name: 'done-npm', version: '2.0.0', source: 'done-npm@2.0.0', update: 'registry' })]),
+    prepare: (profileDir) => { writeDeps(profileDir, ['done-npm']); writeInflightAt(profileDir, [npmRecord('done-npm', '2.0.0')]) },
+  })
+  const doneRes = await doneApp.call(`${API}/updates`)
+  eq(doneRes.status, 200, '已装到 target：GET /updates 200')
+  eq(doneRes.body.interrupted, [], '已装到 target：interrupted 为空')
+  eq(rawInflight(doneApp.profileDir), null, '已装到 target：中断日志文件被删除')
+
+  // B) 已装更高版本：同样清掉。
+  const higherApp = await boot({
+    bundles: [bundle({ name: 'higher-npm', version: '2.5.0', source: 'higher-npm@2.5.0', update: 'registry' })],
+    manager: makePluginManager([bundle({ name: 'higher-npm', version: '2.5.0', source: 'higher-npm@2.5.0', update: 'registry' })]),
+    prepare: (profileDir) => { writeDeps(profileDir, ['higher-npm']); writeInflightAt(profileDir, [npmRecord('higher-npm', '2.0.0')]) },
+  })
+  const higherRes = await higherApp.call(`${API}/updates`)
+  eq(higherRes.status, 200, '已装更高版本：GET /updates 200')
+  eq(higherRes.body.interrupted, [], '已装更高版本：interrupted 为空')
+  eq(rawInflight(higherApp.profileDir), null, '已装更高版本：文件被删除')
+
+  // C) 已装低于 target：保留。
+  const lowerApp = await boot({
+    bundles: [bundle({ name: 'lower-npm', version: '1.5.0', source: 'lower-npm@1.5.0', update: 'registry' })],
+    manager: makePluginManager([bundle({ name: 'lower-npm', version: '1.5.0', source: 'lower-npm@1.5.0', update: 'registry' })]),
+    prepare: (profileDir) => { writeDeps(profileDir, ['lower-npm']); writeInflightAt(profileDir, [npmRecord('lower-npm', '2.0.0')]) },
+  })
+  const lowerRes = await lowerApp.call(`${API}/updates`)
+  eq(lowerRes.status, 200, '已装低于 target：GET /updates 200')
+  eq(lowerRes.body.interrupted.map(record => record.name), ['lower-npm'], '已装低于 target：记录保留')
+  eq(itemsInflight(lowerApp.profileDir)?.map(record => record.name), ['lower-npm'], '已装低于 target：文件保留')
+
+  // D) bundle 不存在（未安装）：保留。
+  const missingApp = await boot({
+    bundles: [],
+    manager: makePluginManager([]),
+    prepare: (profileDir) => { writeDeps(profileDir, []); writeInflightAt(profileDir, [npmRecord('gone-npm', '2.0.0')]) },
+  })
+  const missingRes = await missingApp.call(`${API}/updates`)
+  eq(missingRes.status, 200, 'bundle 不存在：GET /updates 200')
+  eq(missingRes.body.interrupted.map(record => record.name), ['gone-npm'], 'bundle 不存在：记录保留')
+  eq(missingRes.body.interrupted[0]?.missingFromProfile, true, 'bundle 不存在：missingFromProfile=true（不在依赖里）')
+
+  // E) listBundles 抛错：保留、文件不动、GET 仍 200、只 warn 不崩。
+  const beforeRaw = JSON.stringify({ version: 1, items: [npmRecord('boom-list', '2.0.0')] }, null, 2)
+  const boomApp = await boot({
+    bundles: [],
+    manager: (() => {
+      const base = makePluginManager([])
+      return {
+        ...base,
+        async listBundles() {
+          base.calls.listBundles += 1
+          throw new Error('listBundles 坏了')
+        },
+      }
+    })(),
+    prepare: (profileDir) => { writeDeps(profileDir, ['boom-list']); writeInflightAt(profileDir, [npmRecord('boom-list', '2.0.0')]) },
+  })
+  const boomRes = await boomApp.call(`${API}/updates`)
+  eq(boomRes.status, 200, 'listBundles 抛错：GET /updates 仍 200')
+  eq(boomRes.body.interrupted.map(record => record.name), ['boom-list'], 'listBundles 抛错：记录保留')
+  eq(rawInflight(boomApp.profileDir), beforeRaw, 'listBundles 抛错：文件内容原样未改')
+  ok(boomApp.warnLines.some(line => String(line).includes('核对中断记录失败')), 'listBundles 抛错：记录一条 warn', boomApp.warnLines)
+
+  // F) 惰性：核对只在「有残留记录」时才多做一次 listBundles；没有记录时不额外调用。
+  // 注意 GET /updates 本身要算候选列表，会调用 listBundles 一次，所以这里比较「有/无记录」的增量。
+  const lazyApp = await boot({ bundles: [bundle({ name: 'lazy-npm' })], manager: makePluginManager([bundle({ name: 'lazy-npm' })]) })
+  lazyApp.manager.calls.listBundles = 0
+  const lazyRes = await lazyApp.call(`${API}/updates`)
+  eq(lazyRes.status, 200, '无记录：GET /updates 200')
+  eq(lazyRes.body.interrupted, [], '无记录：interrupted 为空')
+  const callsWithoutRecords = lazyApp.manager.calls.listBundles
+  ok(callsWithoutRecords >= 1, '无记录：GET /updates 只做候选列表那一次 listBundles', callsWithoutRecords)
+  eq(lazyApp.warnLines.some(line => String(line).includes('核对中断记录失败')), false, '无记录：不触发核对路径的 warn')
+  // 同一 app 写入一条已完成记录后再 GET：应恰好比无记录时多一次 listBundles（核对那一次）。
+  writeInflightAt(lazyApp.profileDir, [npmRecord('lazy-npm', '1.0.0')])
+  lazyApp.manager.calls.listBundles = 0
+  const lazyWithRecord = await lazyApp.call(`${API}/updates`)
+  eq(lazyWithRecord.body.interrupted, [], '有已完成记录：GET /updates 后记录被清掉')
+  eq(lazyApp.manager.calls.listBundles, callsWithoutRecords + 1, '有记录时核对只多做一次 listBundles（无记录时零额外调用）')
+
+  // G) 启动 warn 不重复报已完成项：一条已完成 + 一条未完成。
+  const startupApp = await boot({
+    bundles: [
+      bundle({ name: 'startup-done', version: '2.0.0', source: 'startup-done@2.0.0', update: 'registry' }),
+      bundle({ name: 'startup-pending', version: '1.0.0', source: 'startup-pending@1.0.0', update: 'registry' }),
+    ],
+    manager: makePluginManager([
+      bundle({ name: 'startup-done', version: '2.0.0', source: 'startup-done@2.0.0', update: 'registry' }),
+      bundle({ name: 'startup-pending', version: '1.0.0', source: 'startup-pending@1.0.0', update: 'registry' }),
+    ]),
+    prepare: (profileDir) => {
+      writeDeps(profileDir, ['startup-done', 'startup-pending'])
+      writeInflightAt(profileDir, [npmRecord('startup-done', '2.0.0'), npmRecord('startup-pending', '2.0.0')])
+    },
+  })
+  await waitFor(() => startupApp.warnLines.some(line => String(line).includes('上次中断的更新')), '启动 warn 出现')
+  const startupWarn = startupApp.warnLines.join(' | ')
+  ok(startupWarn.includes('startup-pending'), '启动 warn 报未完成项', startupWarn)
+  ok(!startupWarn.includes('startup-done'), '启动 warn 不重复报已完成项', startupWarn)
+  eq(itemsInflight(startupApp.profileDir)?.map(record => record.name), ['startup-pending'], '启动核对后文件只剩未完成项')
+
+  // H) Git：commit 完全相等才清掉；不同 commit 保留。
+  const commitA = 'a'.repeat(40)
+  const commitB = 'b'.repeat(40)
+  const gitBundle = (name, commit) => bundle({ name, version: '1.1.0', source: `git+https://github.com/acme/${name}.git#${commit}`, update: 'git' })
+  const gitDoneApp = await boot({
+    bundles: [gitBundle('git-done', commitA)],
+    manager: makePluginManager([gitBundle('git-done', commitA)]),
+    prepare: (profileDir) => {
+      writeDeps(profileDir, ['git-done'])
+      writeInflightAt(profileDir, [{ name: 'git-done', current: '1.0.0', target: '1.1.0', kind: 'git', spec: `git+https://github.com/acme/git-done.git#${commitA}`, requestId: 'req-git-done', phase: 'installing', startedAt: 1_700_000_000_000 }])
+    },
+  })
+  const gitDoneRes = await gitDoneApp.call(`${API}/updates`)
+  eq(gitDoneRes.body.interrupted, [], 'git 同 commit：记录被清掉')
+  eq(rawInflight(gitDoneApp.profileDir), null, 'git 同 commit：文件被删除')
+
+  const gitOtherApp = await boot({
+    bundles: [gitBundle('git-other', commitB)],
+    manager: makePluginManager([gitBundle('git-other', commitB)]),
+    prepare: (profileDir) => {
+      writeDeps(profileDir, ['git-other'])
+      writeInflightAt(profileDir, [{ name: 'git-other', current: '1.0.0', target: '1.1.0', kind: 'git', spec: `git+https://github.com/acme/git-other.git#${commitA}`, requestId: 'req-git-other', phase: 'installing', startedAt: 1_700_000_000_000 }])
+    },
+  })
+  const gitOtherRes = await gitOtherApp.call(`${API}/updates`)
+  eq(gitOtherRes.body.interrupted.map(record => record.name), ['git-other'], 'git 不同 commit：记录保留')
+
+  for (const handle of [doneApp, higherApp, lowerApp, missingApp, boomApp, lazyApp, startupApp, gitDoneApp, gitOtherApp]) {
+    handle.dispose()
+    rmSync(handle.profileDir, { recursive: true, force: true })
+  }
 }
 
 // ---------------------------------------------------------------------------

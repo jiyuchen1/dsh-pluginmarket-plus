@@ -358,6 +358,18 @@ function gearButton(context) {
 }
 
 /**
+ * 点工具条上的「更新状态」区域打开「更新进度」弹窗。
+ * @param {object} context - 渲染上下文。
+ * @returns {Promise<void>} 完成。
+ */
+async function openProgress(context) {
+  const area = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState'))
+  if (area === undefined) throw new Error('找不到更新状态区域（pmu-runState）')
+  area.props.onClick()
+  await settle(context)
+}
+
+/**
  * 打开齿轮设置菜单。
  * @param {object} context - 渲染上下文。
  * @returns {Promise<void>} 完成。
@@ -1434,7 +1446,7 @@ test('单项更新：确认框 + POST /updates/apply', async () => {
   eq(call.body.items[0].commit, undefined, 'registry 行 apply 不带 commit')
   eq(call.body.requestId, undefined, 'apply 不带 requestId 参数')
   text = allText(context)
-  ok(text.includes('更新进度'), '进入进度视图')
+  ok(collect(context.result).some(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState')), '开始更新后出现更新状态区域（进度在弹窗里）')
   eq(findInput(context, '全选').props['data-state'], 'none', '开始更新后清空选择')
   context.unmount()
 })
@@ -1659,6 +1671,301 @@ test('筛选开关回归：POST 响应带 status.config 时两个开关都正确
   context.unmount()
 })
 
+test('更新状态区域：无队列时不显示，更新中旋转，结束后绿色对勾', async () => {
+  bootClient()
+  const stateSeq = [
+    hostState({
+      running: true, active: 'demo-plugin-a', activeRequestId: 'req-1',
+      summary: { total: 2, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 2 },
+      items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'installing', startedAt: 1 })],
+    }),
+    hostState({
+      running: false, finished: true,
+      summary: { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 },
+      items: [
+        hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'done', success: true, startedAt: 1, endedAt: 2 }),
+        hostItem({ name: 'demo-plugin-b', requestId: 'req-2', stage: 'done', success: true, startedAt: 1, endedAt: 2 }),
+      ],
+    }),
+  ]
+  fakeFetch = defaultFetch({ stateSeq })
+  const context = await renderUpdates()
+  const runState = () => collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState'))
+  ok(runState() === undefined, '没有更新队列时不显示状态区域')
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await settle(context)
+  let area = runState()
+  ok(area !== undefined, '开始更新后出现状态区域')
+  eq(area.type, 'button', '状态区域是 button（role=button 语义）')
+  eq(area.props['data-state'], 'running', '更新中 data-state=running')
+  eq(area.props['aria-label'], '更新进行中，点击查看更新进度', '更新中的 aria-label')
+  eq(area.props.title, '更新进行中，点击查看更新进度', '更新中的 title')
+  ok(nodeText(area).includes('0/2'), '显示「已完成数/总数」')
+  ok(collect(area).some(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runIcon')), '有旋转图标')
+  ok(!collect(area).some(el => el.type === 'svg'), '更新中不显示对勾')
+  await tickPoll(context)
+  await settle(context)
+  area = runState()
+  eq(area.props['data-state'], 'done', '结束后 data-state=done')
+  eq(area.props['aria-label'], '更新完成，点击查看更新进度', '更新完成的 aria-label')
+  ok(nodeText(area).includes('2/2'), '结束后显示 2/2')
+  ok(collect(area).some(el => el.type === 'svg'), '结束后显示对勾')
+  context.unmount()
+})
+
+test('队列结束后：页面上也能看到重启提示（弹窗关着时）', async () => {
+  bootClient()
+  const stateSeq = [hostState({
+    running: false, finished: true,
+    summary: { total: 2, success: 1, failed: 0, cancelled: 0, restartRequired: 1, skipped: 0, pending: 0 },
+    items: [
+      hostItem({ name: 'demo-plugin-a', stage: 'done', success: true, startedAt: 1, endedAt: 2 }),
+      hostItem({ name: 'demo-plugin-b', stage: 'done', success: true, restartRequired: true, startedAt: 1, endedAt: 2 }),
+    ],
+    logs: [],
+  })]
+  fakeFetch = defaultFetch({ stateSeq })
+  const context = await renderUpdates()
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await tickPoll(context)
+  await settle(context)
+  const notice = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-restartNotice'))
+  ok(notice !== undefined, '弹窗关着时页面上也有重启提示')
+  ok(nodeText(notice).includes('1 项已更新，重启 DSH 后生效'), '提示文案正确')
+  context.unmount()
+})
+
+test('状态区域持久：结束后点「完成」/ 关闭弹窗都不消失，直到下一次更新', async () => {
+  bootClient()
+  const stateSeq = [hostState({
+    running: false, finished: true,
+    summary: { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 },
+    items: [
+      hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'done', success: true, startedAt: 1, endedAt: 2 }),
+      hostItem({ name: 'demo-plugin-b', requestId: 'req-2', stage: 'done', success: true, startedAt: 1, endedAt: 2 }),
+    ],
+    logs: [],
+  })]
+  fakeFetch = defaultFetch({ stateSeq })
+  const context = await renderUpdates()
+  const runState = () => collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState'))
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await tickPoll(context)
+  await settle(context)
+  eq(runState()?.props['data-state'], 'done', '结束后状态区域是绿色对勾形态')
+  ok(nodeText(runState()).includes('2/2'), '计数为 2/2')
+  // 打开弹窗 → 点「完成」→ 状态区域仍在（不是清零）
+  await openProgress(context)
+  await clickModalButton(context, '完成')
+  let area = runState()
+  ok(area !== undefined, '点「完成」后状态区域仍在')
+  eq(area.props['data-state'], 'done', '仍是绿色对勾形态')
+  ok(nodeText(area).includes('2/2'), '计数仍保留')
+  // 再打开 → 遮罩关闭 → 仍在
+  await openProgress(context)
+  const layer = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-modalLayer'))
+  layer.props.onClick()
+  await settle(context)
+  ok(runState() !== undefined, '遮罩关闭后状态区域仍在')
+  ok(allText(context).includes('2/2'), '计数仍在页面上可见')
+  // 手动检查更新不会把它清掉
+  await clickButton(context, '检查更新')
+  ok(runState() !== undefined, '手动检查更新后状态区域仍在')
+  context.unmount()
+})
+
+test('progressTally：需重启项不重复计数（done ≤ total）', () => {
+  const { component } = bootClient()
+  const { progressTally } = component.inspectable()
+  // Host summary 形状：需重启项同时计入 success 与 restartRequired（lib/updates.js flattenUpdateOutcome）。
+  const hostSummary = (over) => Object.assign({ total: 0, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 }, over)
+  const item = (over) => Object.assign({ key: 'k', name: 'p', stage: 'done', success: false, failed: false, cancelled: false, restartRequired: false }, over)
+
+  // ① 普通成功 2 项
+  const okTwo = [item({ stage: 'done', success: true }), item({ stage: 'done', success: true })]
+  eq(JSON.stringify(progressTally(okTwo, hostSummary({ total: 2, success: 2 }))), JSON.stringify({ done: 2, total: 2 }), '普通成功：2/2')
+
+  // ② 成功 + 需重启（旧实现会算成 3/3）
+  const restart = [
+    item({ name: 'a', stage: 'done', success: true }),
+    item({ name: 'b', stage: 'done', success: true, restartRequired: true }),
+  ]
+  const restartTally = progressTally(restart, hostSummary({ total: 2, success: 2, restartRequired: 1 }))
+  eq(JSON.stringify(restartTally), JSON.stringify({ done: 2, total: 2 }), '成功+需重启：2/2（不是 3/3）')
+  ok(restartTally.done <= restartTally.total, '成功+需重启：done ≤ total')
+
+  // ③ 失败 1 + 成功 1
+  const mixed = [item({ name: 'a', stage: 'done', success: true }), item({ name: 'b', stage: 'failed', failed: true })]
+  eq(JSON.stringify(progressTally(mixed, hostSummary({ total: 2, success: 1, failed: 1 }))), JSON.stringify({ done: 2, total: 2 }), '成功+失败：2/2')
+
+  // ④ 取消 1 + 成功 1
+  const cancelled = [item({ name: 'a', stage: 'done', success: true }), item({ name: 'b', stage: 'cancelled', cancelled: true })]
+  eq(JSON.stringify(progressTally(cancelled, hostSummary({ total: 2, success: 1, cancelled: 1, skipped: 1 }))), JSON.stringify({ done: 2, total: 2 }), '成功+取消：2/2')
+
+  // 未完成项不计入 done
+  const running = [item({ name: 'a', stage: 'installing' }), item({ name: 'b', stage: 'done', success: true })]
+  eq(JSON.stringify(progressTally(running, hostSummary({ total: 2, success: 1, pending: 1 }))), JSON.stringify({ done: 1, total: 2 }), '运行中：1/2')
+
+  // 全部重启：仍是 n/n
+  const allRestart = [item({ name: 'a', stage: 'done', success: true, restartRequired: true }), item({ name: 'b', stage: 'done', success: true, restartRequired: true })]
+  const allRestartTally = progressTally(allRestart, hostSummary({ total: 2, success: 2, restartRequired: 2 }))
+  eq(JSON.stringify(allRestartTally), JSON.stringify({ done: 2, total: 2 }), '全部需重启：2/2')
+  ok(allRestartTally.done <= allRestartTally.total, '全部需重启：done ≤ total')
+
+  // 边界：还没有 items 时用 summary.total 兜底；空输入不炸
+  eq(JSON.stringify(progressTally([], hostSummary({ total: 3 }))), JSON.stringify({ done: 0, total: 3 }), '还没有 items：0/3（用 summary.total 兜底）')
+  eq(JSON.stringify(progressTally(undefined, undefined)), JSON.stringify({ done: 0, total: 0 }), '空输入：0/0')
+  // 所有组合都满足 done ≤ total
+  for (const [rows, summary] of [[okTwo, hostSummary({ total: 2 })], [restart, hostSummary({ total: 2 })], [mixed, hostSummary({ total: 2 })], [cancelled, hostSummary({ total: 2 })], [running, hostSummary({ total: 2 })]]) {
+    const tally = progressTally(rows, summary)
+    ok(tally.done <= tally.total, `done ≤ total（${tally.done}/${tally.total}）`)
+  }
+})
+
+test('状态区域四种组合显示 n/total（成功 / 成功+需重启 / 失败 / 取消）', async () => {
+  const runCase = async (stateSeq, expected) => {
+    bootClient()
+    fakeFetch = defaultFetch({ stateSeq })
+    const context = await renderUpdates()
+    await clickButton(context, '更新全部')
+    await clickModalButton(context, '开始更新')
+    await tickPoll(context)
+    await settle(context)
+    const area = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState'))
+    const text = nodeText(area).trim()
+    eq(text, expected, `状态区域显示 ${expected}（实际 ${text}）`)
+    const [done, total] = text.split('/').map(Number)
+    ok(done <= total, `${expected}：done ≤ total`)
+    context.unmount()
+  }
+  const base = (items, summary) => [hostState({ running: false, finished: true, summary, items, logs: [] })]
+  const mk = (over) => hostItem(Object.assign({ name: 'demo-plugin-a', stage: 'done', success: true, startedAt: 1, endedAt: 2 }, over))
+
+  // ① 普通成功 2 项
+  await runCase(base([mk({ name: 'demo-plugin-a' }), mk({ name: 'demo-plugin-b' })],
+    { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 }), '2/2')
+  // ② 成功 + 需重启（旧实现会显示 3/3）
+  await runCase(base([mk({ name: 'demo-plugin-a' }), mk({ name: 'demo-plugin-b', restartRequired: true })],
+    { total: 2, success: 2, failed: 0, cancelled: 0, restartRequired: 1, skipped: 0, pending: 0 }), '2/2')
+  // ③ 失败 1 + 成功 1
+  await runCase(base([mk({ name: 'demo-plugin-a' }), mk({ name: 'demo-plugin-b', stage: 'failed', success: false, failed: true, error: 'boom' })],
+    { total: 2, success: 1, failed: 1, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 }), '2/2')
+  // ④ 取消 1 + 成功 1
+  await runCase(base([mk({ name: 'demo-plugin-a' }), mk({ name: 'demo-plugin-b', stage: 'cancelled', success: false, cancelled: true, error: 'cancelled' })],
+    { total: 2, success: 1, failed: 0, cancelled: 1, restartRequired: 0, skipped: 1, pending: 0 }), '2/2')
+})
+
+test('更新状态区域：CSS 旋转动画 + 绿色对勾 + 降级', () => {
+  const { component } = bootClient()
+  const css = component.inspectable().css
+  ok(/@keyframes pmu-spin\{/u.test(css), '有 @keyframes pmu-spin')
+  ok(/animation:pmu-spin[^;}]*infinite/u.test(css), '更新中图标持续旋转')
+  ok(/@media \(prefers-reduced-motion:reduce\)\{[^}]*\.pmu-runState/u.test(css), 'prefers-reduced-motion 有降级')
+  ok(/prefers-reduced-motion:reduce\)\{[^}]*animation:none/u.test(css), '降级时动画关闭（静态）')
+  ok(/\.pmu-runState\[data-state="done"\] \.pmu-runIcon\{[^}]*background:var\(--dsw-alias-state-success-primary\)/u.test(css), '绿色对勾用 success token 背景')
+  ok(/\.pmu-runState\[data-state="running"\] \.pmu-runIcon\{[^}]*border-top-color/u.test(css), '旋转圈用边框实现')
+})
+
+test('更新进度弹窗：点状态区域打开、内容完整、关闭后可重开', async () => {
+  bootClient()
+  const stateSeq = [
+    hostState({
+      running: true, active: 'demo-plugin-a', activeRequestId: 'req-1',
+      summary: { total: 2, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 2 },
+      items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'installing', startedAt: 1 })],
+      logs: ['installing demo-plugin-a'],
+    }),
+    hostState({
+      running: false, finished: true,
+      summary: { total: 2, success: 1, failed: 1, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 },
+      items: [
+        hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'done', success: true, startedAt: 1, endedAt: 2 }),
+        hostItem({ name: 'demo-plugin-b', requestId: 'req-2', stage: 'failed', failed: true, error: 'EACCES', startedAt: 1, endedAt: 2 }),
+      ],
+    }),
+  ]
+  fakeFetch = defaultFetch({ stateSeq })
+  const context = await renderUpdates()
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await settle(context)
+  const dialog = () => collect(context.result).find(el => el.props?.role === 'dialog' && el.props['aria-label'] === '更新进度')
+  ok(dialog() === undefined, '开始更新后不自动弹窗（进度不再内联）')
+  ok(!collect(context.result).some(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-progressItem')), '内联位置不再渲染进度项')
+  // 点状态区域打开
+  const area = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState'))
+  area.props.onClick()
+  await settle(context)
+  ok(dialog() !== undefined, '点状态区域打开「更新进度」弹窗')
+  let text = allText(context)
+  ok(text.includes('demo-plugin-a'), '弹窗里有进度项')
+  ok(text.includes('安装'), '弹窗里有阶段徽标')
+  ok(text.includes('取消当前'), '弹窗里有「取消当前」')
+  ok(collect(context.result).some(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-progressItem')), '进度项渲染在弹窗内')
+  // 关闭：Escape / 遮罩
+  const layer = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-modalLayer'))
+  ok(layer !== undefined, '有遮罩层')
+  layer.props.onClick()
+  await settle(context)
+  ok(dialog() === undefined, '点遮罩关闭弹窗')
+  ok(collect(context.result).some(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState')), '关闭后状态区域仍在')
+  // 再次打开仍显示实时进度
+  await tickPoll(context)
+  await settle(context)
+  collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState')).props.onClick()
+  await settle(context)
+  text = allText(context)
+  ok(text.includes('demo-plugin-b') && text.includes('EACCES'), '重新打开显示最新进度（含失败项与原因）')
+  ok(text.includes('成功 1 项') && text.includes('失败 1 项'), '结束汇总可见（成功 / 失败）')
+  // 弹窗里的「完成」按钮关闭
+  await clickModalButton(context, '完成')
+  ok(dialog() === undefined, '弹窗「完成」按钮关闭')
+  context.unmount()
+})
+
+test('更新进度弹窗：进行中关闭不中断队列，可再次打开', async () => {
+  bootClient()
+  const stateSeq = [
+    hostState({
+      running: true, active: 'demo-plugin-a', activeRequestId: 'req-1',
+      summary: { total: 1, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 1 },
+      items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'removing', startedAt: 1 })],
+    }),
+    hostState({
+      running: true, active: 'demo-plugin-a', activeRequestId: 'req-1',
+      summary: { total: 1, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 1 },
+      items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'installing', startedAt: 1 })],
+    }),
+  ]
+  fakeFetch = defaultFetch({ stateSeq })
+  const context = await renderUpdates()
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await settle(context)
+  collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState')).props.onClick()
+  await settle(context)
+  ok(allText(context).includes('更新进度'), '打开弹窗')
+  const cancelCallsBefore = fakeFetch.calls.filter(item => item.url.endsWith('/updates/cancel')).length
+  // 关闭弹窗
+  const layer = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-modalLayer'))
+  layer.props.onClick()
+  await settle(context)
+  eq(fakeFetch.calls.filter(item => item.url.endsWith('/updates/cancel')).length, cancelCallsBefore, '关闭弹窗不发 cancel（不中断队列）')
+  // 轮询继续推进
+  await tickPoll(context)
+  await settle(context)
+  const area = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState'))
+  eq(area.props['data-state'], 'running', '关闭弹窗后仍在更新')
+  area.props.onClick()
+  await settle(context)
+  ok(allText(context).includes('安装'), '再次打开显示轮询到的最新阶段（安装），而不是从头开始')
+  ok(allText(context).includes('移除 → 安装'), '阶段历史也在（说明不是重新种下的初始状态）')
+  context.unmount()
+})
+
 test('进度视图：真实 state 形状 / 顶层日志 / 取消当前 / 汇总', async () => {
   bootClient()
   const stateSeq = [
@@ -1689,6 +1996,7 @@ test('进度视图：真实 state 形状 / 顶层日志 / 取消当前 / 汇总'
   await settle(context)
   await clickModalButton(context, '开始更新')
   ok(intervals.length > 0, '开始轮询进度')
+  await openProgress(context)
   ok(allText(context).includes('移除'), '进度显示「移除」阶段')
   ok(allText(context).includes('取消当前'), '运行中可见「取消当前」')
   await tickPoll(context)
@@ -1728,6 +2036,7 @@ test('进度：取消项显示「已取消」且不回显 error 原文', async (
   await clickButton(context, '更新全部')
   await clickModalButton(context, '开始更新')
   await tickPoll(context)
+  await openProgress(context)
   const text = allText(context)
   ok(text.includes('已取消'), '取消项阶段显示「已取消」')
   ok(!/(^|\s)cancelled(\s|$)/u.test(text), '不回显 Host 写入的 error:"cancelled" 原文')
@@ -1812,6 +2121,7 @@ test('批量失败继续 + 汇总失败数 + 回滚文案（真实 ChangeResult�
   await clickModalButton(context, '开始更新')
   await tickPoll(context)
   await settle(context)
+  await openProgress(context)
   const text = allText(context)
   ok(text.includes('失败 1 项') && text.includes('成功 1 项'), '批量结束后汇总成功 / 失败')
   ok(text.includes('install failed'), '失败项显示错误')
@@ -1839,6 +2149,7 @@ test('回滚失败文案：restore.application=failed + error.diagnostic', async
   await clickModalButton(context, '开始更新')
   await tickPoll(context)
   await settle(context)
+  await openProgress(context)
   const text = allText(context)
   ok(text.includes('回滚也失败了: ENOSPC'), 'restore.application=failed → 回滚也失败 + diagnostic')
   ok(!text.includes('已装回原版本'), '回滚失败时不显示已装回原版本')
@@ -2020,7 +2331,7 @@ test('桥接失败与 error 分支', async () => {
   const context = await renderUpdates()
   ok(allText(context).includes('读取失败：boom'), '列表读取失败显示错误')
   await clickButton(context, '检查更新')
-  ok(allText(context).includes('检查完成'), '检查成功后有提示')
+  ok(!allText(context).includes('检查完成'), '检查成功后不再弹「检查完成：可更新 N 项」提示条')
   eq(fakeFetch.calls.filter(item => item.url.endsWith('/updates/check')).length, 1, '检查只发一次')
   context.unmount()
 })
@@ -2053,6 +2364,7 @@ test('打开页面时已有队列在跑 → 提示并接上进度', async () => 
   const context = await renderUpdates()
   ok(allText(context).includes('另一个更新正在进行'), '提示已有更新在跑')
   await tickPoll(context)
+  await openProgress(context)
   ok(allText(context).includes('更新进度') && allText(context).includes('安装'), '接上了正在运行的进度')
   context.unmount()
 })
@@ -2098,6 +2410,86 @@ test('失联：连续 3 次轮询失败后停止轮询并显示失联文案，�
   context.unmount()
 })
 
+test('空队列超时：前 8 次保留进度，第 9 次停止轮询并清空（已装到目标 → 完成提示）', async () => {
+  bootClient()
+  // 初始列表有可安装项（能发起更新）；超时对账后返回的列表里不再有 a/b（已装到目标版本）
+  const impl = defaultFetch()
+  let stateCalls = 0
+  const after = [{ name: 'demo-plugin-c', current: '2.0.0', latest: '3.0.0', kind: 'npm', state: 'incompatible', enabled: true, incompatible: { reason: 'peer' }, prerelease: false, deprecated: null }]
+  fakeFetch = withCalls(async (url, init) => {
+    if (url === '/api/pluginmarket-plus/updates/state') {
+      stateCalls += 1
+      // Host 重载后队列丢了：永远返回空队列，且不是 done
+      return { ok: true, status: 200, json: async () => ({ ok: true, running: false, stopped: false, finished: false, summary: {}, items: [] }) }
+    }
+    if (url === '/api/pluginmarket-plus/updates' && stateCalls >= 9) {
+      const response = await impl(url, init)
+      const payload = await response.json()
+      return { ok: true, status: 200, json: async () => Object.assign({}, payload, { candidates: after }) }
+    }
+    return impl(url, init)
+  })
+  const context = await renderUpdates()
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await settle(context)
+  const runState = () => collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState'))
+  ok(runState() !== undefined, '开始后状态区域可见')
+  // 第 1 次已在 startPolling 里立即执行；再 tick 7 次 = 共 8 次，仍保留
+  for (let i = 0; i < 7; i += 1) await tickPoll(context)
+  eq(stateCalls, 8, '已轮询 8 次')
+  ok(runState() !== undefined, '前 8 次仍保留进度（状态区域在）')
+  ok(allText(context).includes('更新进度') === false, '未打开弹窗时不应有进度文本')
+  // 第 9 次 → 判定丢失
+  await tickPoll(context)
+  eq(stateCalls, 9, '第 9 次轮询')
+  await settle(context)
+  ok(runState() === undefined, '超时后状态区域隐藏')
+  const text = allText(context)
+  ok(text.includes('更新已转由后台继续或已完成，进度视图已重置；请查看插件详情确认版本。'), '已装到目标 → 完成提示')
+  ok(!text.includes('更新进度已丢失，请重新检查更新后再试。'), '不出现丢失提示')
+  eq(fakeFetch.calls.filter(item => item.url.endsWith('/updates/cancel')).length, 0, '不发 cancel')
+  // 再 tick 也不会继续轮询
+  const before = stateCalls
+  await tickPoll(context)
+  eq(stateCalls, before, '停止轮询后不再请求 /updates/state')
+  context.unmount()
+})
+
+test('空队列超时：仍可更新 → 丢失提示', async () => {
+  bootClient()
+  const impl = defaultFetch() // 默认候选里 demo-plugin-a 仍可更新
+  let stateCalls = 0
+  fakeFetch = withCalls(async (url, init) => {
+    if (url === '/api/pluginmarket-plus/updates/state') {
+      stateCalls += 1
+      return { ok: true, status: 200, json: async () => ({ ok: true, running: false, stopped: false, finished: false, summary: {}, items: [] }) }
+    }
+    return impl(url, init)
+  })
+  const context = await renderUpdates()
+  await clickButton(context, '更新全部')
+  await clickModalButton(context, '开始更新')
+  await settle(context)
+  for (let i = 0; i < 8; i += 1) await tickPoll(context)
+  await settle(context)
+  const text = allText(context)
+  ok(text.includes('更新进度已丢失，请重新检查更新后再试。'), '仍可更新 → 丢失提示')
+  ok(!text.includes('更新已转由后台继续或已完成'), '不出现完成提示')
+  context.unmount()
+})
+
+test('nextEmptyQueueVerdict：前 8 次保留、第 9 次超时', () => {
+  const { component } = bootClient()
+  const { nextEmptyQueueVerdict, emptyQueueLimit } = component.inspectable()
+  eq(emptyQueueLimit, 8, '有界次数 8')
+  const seq = [1,2,3,4,5,6,7,8].map(n => nextEmptyQueueVerdict(n - 1))
+  ok(seq.every(item => item.lost === false), '前 8 次都不超时')
+  eq(seq[7].count, 8, '第 8 次 count=8')
+  eq(JSON.stringify(nextEmptyQueueVerdict(8)), JSON.stringify({ count: 9, lost: true }), '第 9 次超时')
+  eq(JSON.stringify(nextEmptyQueueVerdict(undefined)), JSON.stringify({ count: 1, lost: false }), '未初始化按 0 处理')
+})
+
 test('nextPollFailure：阈值 3', () => {
   const { component } = bootClient()
   const { nextPollFailure, lostThreshold } = component.inspectable()
@@ -2139,6 +2531,7 @@ test('批量行为不变：restart-required 不暂停队列，继续更新下一
   await clickButton(context, '更新全部')
   await clickModalButton(context, '开始更新')
   await tickPoll(context)
+  await openProgress(context)
   let text = allText(context)
   ok(text.includes('demo-plugin-b') && text.includes('安装'), '第一项 restart-required 后队列继续跑第二项')
   ok(!text.includes('重启 DSH 后生效'), '未结束时还不显示结束提示')
@@ -2175,6 +2568,7 @@ test('批量结束：restartRequired > 0 时进度面板顶部提示重启', asy
   await tickPoll(context)
   await tickPoll(context)
   await settle(context)
+  await openProgress(context)
   const text = allText(context)
   ok(text.includes('1 项已更新，重启 DSH 后生效'), '进度面板顶部显示重启提示')
   const panel = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-restartNotice'))
@@ -2182,6 +2576,102 @@ test('批量结束：restartRequired > 0 时进度面板顶部提示重启', asy
   ok(String(panel.props.className).includes('pmu-notice'), '复用 pmu-notice 样式')
   // 不自动重启、不杀进程：没有额外的「重启」按钮
   ok(!collect(context.result).some(el => el.type === 'button' && nodeText(el).trim() === '重启 DSH'), '不提供自动重启按钮')
+  context.unmount()
+})
+
+test('中断区块：队列运行中绝不显示，结束后才按 interrupted 显示', async () => {
+  bootClient()
+  const interruptedRef = { items: [
+    { name: 'demo-plugin-c', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-9', phase: 'installing', startedAt: 1, missingFromProfile: false },
+  ] }
+  // 运行中：GET /updates 同时带 running:true 与 interrupted（模拟切走再切回）；随后队列结束。
+  const stateSeq = [
+    hostState({
+      running: true, active: 'demo-plugin-a', activeRequestId: 'req-1',
+      summary: { total: 1, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 1 },
+      items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'installing', startedAt: 1 })],
+      logs: [],
+    }),
+    hostState({
+      running: false, finished: true,
+      summary: { total: 1, success: 1, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 0 },
+      items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'done', success: true, startedAt: 1, endedAt: 2 })],
+      logs: [],
+    }),
+  ]
+  const impl = defaultFetch({ interruptedRef, stateSeq })
+  let running = true
+  fakeFetch = withCalls(async (url, init) => {
+    if (url === '/api/pluginmarket-plus/updates') {
+      const response = await impl(url, init)
+      const payload = await response.json()
+      return { ok: true, status: 200, json: async () => Object.assign({}, payload, { running }) }
+    }
+    return impl(url, init)
+  })
+  const context = await renderUpdates()
+  let text = allText(context)
+  ok(text.includes('另一个更新正在进行'), '运行中提示接上了进度')
+  ok(!text.includes('上次更新中断'), '运行中即使带 interrupted 也不显示中断区块')
+  ok(!collect(context.result).some(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-interrupted')), '运行中没有 pmu-interrupted 元素')
+  // 队列结束：finish 后 load(true) 重新读 GET /updates（running:false，interrupted 仍有残留）→ 显示
+  running = false
+  await tickPoll(context)
+  await settle(context)
+  text = allText(context)
+  ok(text.includes('上次更新中断'), '队列结束后按新的 GET /updates 显示中断区块')
+  ok(text.includes('demo-plugin-c'), '区块里有残留项')
+  context.unmount()
+})
+
+test('中断区块：切回时序（running=true 恢复进度，不渲染中断区块）', async () => {
+  bootClient()
+  const interruptedRef = { items: [
+    { name: 'demo-plugin-c', current: '1.0.0', target: '2.0.0', kind: 'npm', requestId: 'req-9', phase: 'installing', startedAt: 1, missingFromProfile: false },
+  ] }
+  const stateSeq = [hostState({
+    running: true, active: 'demo-plugin-a', activeRequestId: 'req-1',
+    summary: { total: 1, success: 0, failed: 0, cancelled: 0, restartRequired: 0, skipped: 0, pending: 1 },
+    items: [hostItem({ name: 'demo-plugin-a', requestId: 'req-1', stage: 'installing', startedAt: 1 })],
+    logs: [],
+  })]
+  const impl = defaultFetch({ interruptedRef, stateSeq })
+  fakeFetch = withCalls(async (url, init) => {
+    if (url === '/api/pluginmarket-plus/updates') {
+      const response = await impl(url, init)
+      const payload = await response.json()
+      return { ok: true, status: 200, json: async () => Object.assign({}, payload, { running: true }) }
+    }
+    return impl(url, init)
+  })
+  const context = await renderUpdates()
+  await tickPoll(context)
+  await settle(context)
+  ok(allText(context).includes('另一个更新正在进行'), '先读 progress：running=true 时接上进度')
+  ok(!allText(context).includes('上次更新中断'), '切回时 running=true 不渲染中断区块')
+  const area = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-runState'))
+  ok(area !== undefined, '状态区域可见（进度优先）')
+  context.unmount()
+})
+
+test('中断区块：missingFromProfile 项显示「已从 profile 依赖中移除」与「需要重新安装」', async () => {
+  bootClient()
+  const interruptedRef = { items: [
+    { name: 'gone-plugin', current: '1.0.0', target: '1.1.0', kind: 'npm', requestId: 'req-1', phase: 'installing', startedAt: 1, missingFromProfile: true },
+    { name: 'still-plugin', current: '2.0.0', target: '2.1.0', kind: 'npm', requestId: 'req-2', phase: 'installing', startedAt: 1, missingFromProfile: false },
+  ] }
+  fakeFetch = defaultFetch({ interruptedRef })
+  const context = await renderUpdates()
+  const block = collect(context.result).find(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-interrupted'))
+  ok(block !== undefined, '中断区块存在')
+  const rows = collect(block).filter(el => String(el.props?.className ?? '').split(/\s+/u).includes('pmu-interruptedRow'))
+  eq(rows.length, 2, '两行')
+  const goneRow = nodeText(rows[0])
+  ok(goneRow.includes('已从 profile 依赖中移除'), 'missingFromProfile 行有标记')
+  ok(goneRow.includes('需要重新安装'), 'missingFromProfile 行有更强提示')
+  const okRow = nodeText(rows[1])
+  ok(!okRow.includes('已从 profile 依赖中移除'), '非 missingFromProfile 行没有该标记')
+  ok(!okRow.includes('需要重新安装'), '非 missingFromProfile 行没有更强提示')
   context.unmount()
 })
 
@@ -2267,7 +2757,9 @@ test('中断恢复：readInterrupted / readRecoverResults 纯函数', () => {
   eq(readInterrupted(undefined).length, 0, 'undefined → 空数组')
   eq(readInterrupted([]).length, 0, '空数组 → 空数组')
   const one = readInterrupted([{ name: 'p', current: '1.0.0', target: '1.1.0', kind: 'git', spec: 'github:o/r#abc', phase: 'installing' }])
-  eq(JSON.stringify(one), JSON.stringify([{ name: 'p', current: '1.0.0', target: '1.1.0', kind: 'git', spec: 'github:o/r#abc', phase: 'installing' }]), '按 Host 字段归一')
+  eq(JSON.stringify(one), JSON.stringify([{ name: 'p', current: '1.0.0', target: '1.1.0', kind: 'git', spec: 'github:o/r#abc', phase: 'installing', missingFromProfile: false }]), '按 Host 字段归一（含 missingFromProfile 默认 false）')
+  const missing = readInterrupted([{ name: 'gone', missingFromProfile: true }])
+  eq(missing[0].missingFromProfile, true, 'missingFromProfile:true 原样保留')
   eq(readInterrupted([{ name: '' }, null, 'x']).length, 0, '丢掉坏记录')
   eq(readInterrupted([{ name: 'a', kind: 'weird' }])[0].kind, 'npm', 'kind 只认 git，其余归 npm')
   const merged = readRecoverResults([{ name: 'a', ok: true }, { name: 'b', ok: false, error: 'ENOSPC' }, { name: '' }])

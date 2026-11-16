@@ -1,6 +1,6 @@
 {
   "name": "dsh-pluginmarket-plus",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Plugin market enhancements for DeepSeek Harness: cache the market index JSON on local disk with a local mirror for the Discover page, and check or batch-update installed plugins with progress, cancellation and version exemptions.",
   "type": "module",
   "main": "./lib/index.js",
