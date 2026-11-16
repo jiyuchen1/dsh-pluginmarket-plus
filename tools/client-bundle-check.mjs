@@ -829,22 +829,35 @@ section('注册：plugins.tab 席位与 locale 词典')
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
 
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
-  ok(tab !== undefined, 'registrations 里有 plugins.tab 席位', loaded.state.registrations.map(entry => entry.descriptor.name))
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
+  ok(tab !== undefined, 'registrations 里有「可更新」席位', loaded.state.registrations.map(entry => `${entry.descriptor.name}#${entry.descriptor.id}`))
+  eq(tab?.descriptor.name, 'plugins.tab', '「可更新」席位挂在 plugins.tab')
   eq(tab?.descriptor.id, 'pluginmarket-plus-updates', 'plugins.tab 的 id = pluginmarket-plus-updates')
   eq(tab?.descriptor.order, 20, 'plugins.tab 的 order = 20')
   eq(typeof tab?.descriptor.label, 'function', 'plugins.tab 的 label 是 thunk')
   eq(typeof tab?.component, 'function', 'plugins.tab 注册了组件')
   ok(loaded.state.injected.includes('plugins.tab'), 'slots.inject 请求过 plugins.tab', loaded.state.injected)
 
-  // 既有席位没被破坏。
-  for (const [name, id, order] of [['settings.section', 'pluginmarket-plus', 41], ['settings.plugins.tab', 'pluginmarket-plus', 55], ['settings.section.icon', 'pluginmarket-plus', 41]]) {
-    const entry = loaded.state.registrations.find(item => item.descriptor.name === name)
-    ok(entry !== undefined, `原有席位仍注册：${name}`, loaded.state.registrations.map(item => item.descriptor.name))
-    eq(entry?.descriptor.id, id, `${name} 的 id 不变`)
-    eq(entry?.descriptor.order, order, `${name} 的 order 不变`)
-  }
+  // 「插件源缓存」tab：id / order / label，且排在「可更新」之前（discover 之后）。
+  const cacheTab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-cache')
+  ok(cacheTab !== undefined, 'registrations 里有「插件源缓存」席位', loaded.state.registrations.map(entry => `${entry.descriptor.name}#${entry.descriptor.id}`))
+  eq(cacheTab?.descriptor.name, 'plugins.tab', '「插件源缓存」席位挂在 plugins.tab')
+  eq(cacheTab?.descriptor.order, 10, '「插件源缓存」的 order = 10')
+  eq(typeof cacheTab?.component, 'function', '「插件源缓存」注册了组件')
 
+  // plugins.tab 下只有本插件的两个 tab（discover 由宿主提供，不在本插件注册表里）。
+  const tabRegistrations = loaded.state.registrations.filter(entry => entry.descriptor.name === 'plugins.tab')
+  eq(tabRegistrations.map(entry => entry.descriptor.id).sort(), ['pluginmarket-plus-cache', 'pluginmarket-plus-updates'], 'plugins.tab 下本插件注册 2 个 tab（缓存 order 10 / 可更新 order 20）')
+  const orders = tabRegistrations.map(entry => ({ id: entry.descriptor.id, order: entry.descriptor.order }))
+  ok(orders.find(entry => entry.id === 'pluginmarket-plus-cache').order < orders.find(entry => entry.id === 'pluginmarket-plus-updates').order, '缓存 tab 排在「可更新」之前（10 < 20）', orders)
+
+  // 设置侧注册已全部移除。
+  eq(loaded.state.registrations.filter(entry => String(entry.descriptor.name).startsWith('settings.')).length, 0, '不再有任何 settings.* 注册', loaded.state.registrations.map(entry => entry.descriptor.name))
+  for (const name of ['settings.section', 'settings.plugins.tab', 'settings.section.icon']) {
+    eq(loaded.state.registrations.filter(entry => entry.descriptor.name === name && String(entry.descriptor.id).startsWith('pluginmarket-plus')).length, 0, `设置侧没有本插件注册：${name}`)
+    ok(!loaded.state.injected.includes(name), `slots.inject 没有请求 ${name}`, loaded.state.injected)
+  }
+  eq(loaded.state.registrations.length, 2, '本插件只注册 2 个席位（都在 plugins.tab）', loaded.state.registrations.map(entry => entry.descriptor.name))
   // 词典：zh / en 键集合一致。
   const dict = loaded.state.dictionaries.find(entry => entry.ns === DICT_NS)
   ok(dict !== undefined, `locale.register 收到 ${DICT_NS} 词典`, loaded.state.dictionaries.map(entry => entry.ns))
@@ -886,11 +899,117 @@ section('注册：plugins.tab 席位与 locale 词典')
 // ---------------------------------------------------------------------------
 // 3. 渲染冒烟
 // ---------------------------------------------------------------------------
+section('插件源缓存 tab：label（zh/en）与 tab 内渲染')
+{
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-cache')
+  const dict = loaded.state.dictionaries.find(entry => entry.ns === DICT_NS)
+  eq(tab?.descriptor.label(), '插件源缓存', '缓存 tab 的 zh label = 插件源缓存')
+  eq(dict?.provided.en?.cacheTab, 'Plugin source cache', '词典 en.cacheTab = Plugin source cache')
+  eq(dict?.provided.zh?.cacheTab, '插件源缓存', '词典 zh.cacheTab = 插件源缓存')
+  eq(dict?.provided.zh?.nav, undefined, '旧 nav 文案键已删除')
+  eq(dict?.provided.zh?.title, undefined, '旧 title 文案键已删除')
+
+  // /status 假响应（真实 Host statusPayload 形状）。
+  const statusPayload = {
+    ok: true,
+    origin: 'http://127.0.0.1:3080',
+    mirrorBase: 'http://127.0.0.1:3080/pluginmarket-plus/index',
+    cacheDir: 'C:/profile/.pluginmarket-plus',
+    entryId: 'dsh-pluginmarket-plus',
+    nextRefreshAt: Date.now() + 3_600_000,
+    config: { autoRefresh: true, refreshIntervalHours: 4, managePluginMarket: true, fetchTimeoutMs: 120000, maxBytes: 67108864, retries: 2 },
+    sources: [
+      {
+        id: 'abc123',
+        url: 'https://example.test/index.json',
+        mirrorUrl: 'http://127.0.0.1:3080/pluginmarket-plus/index/abc123.json',
+        state: 'ok',
+        bytes: 2048,
+        plugins: 12,
+        fetchedAt: Date.now() - 60_000,
+        error: null,
+        refreshing: false,
+        title: '示例索引',
+      },
+    ],
+    pluginMarket: { available: true, managed: true, indexes: ['http://127.0.0.1:3080/pluginmarket-plus/index/abc123.json'], summaries: [], error: null },
+    writable: true,
+  }
+
+  const ctx = makePluginContext(loaded.state)
+  loaded.exports.apply(ctx)
+  const bridge = makeBridge({ candidates: CANDIDATES })
+  loaded.state.responses = (url, init) => {
+    if (url === `${API}/status`) {
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => statusPayload,
+        text: async () => JSON.stringify(statusPayload),
+      })
+    }
+    return bridge(url, init)
+  }
+  const t = ctx.locale.bind()
+  const view = render(tab.component, { t })
+  await settle(view)
+
+  const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
+  const texts = view.texts()
+  const joined = texts.join(' | ')
+  ok(joined.includes('插件源缓存') || joined.includes('把「插件 → 发现」读取的索引 JSON'), '缓存 tab 渲染出内容', joined.slice(0, 300))
+
+  // 根节点带 pmp-tabPage（tab 里不要设置页的宽度/内边距）。
+  const root = view.elements().find(element => hasClass('pmp-page')(element))
+  ok(root !== undefined && hasClass('pmp-tabPage')(root), '根节点带 pmp-tabPage', root?.props?.className)
+  const css = latestCss(loaded.state)
+  eq(cssValue(css, '.pmp-tabPage', 'max-width'), 'none', '.pmp-tabPage 不限制宽度')
+  eq(cssValue(css, '.pmp-tabPage', 'padding'), '0', '.pmp-tabPage 去掉设置页内边距')
+  eq(cssRule(css, '.pmp-title'), '', '不再有 .pmp-title 样式')
+
+  // 无重复标题：没有 h1/h2，tab 内只有卡片/分节小标题。
+  eq(view.elements().filter(element => element.type === 'h1' || element.type === 'h2').length, 0, '缓存 tab 里没有 h1/h2 重复标题', view.elements().filter(element => element.type === 'h1' || element.type === 'h2').map(element => elementText(element)))
+  eq(view.elements().filter(hasClass('pmp-title')).length, 0, '没有 pmp-title 元素')
+
+  // 状态卡 / 索引源行：标题、状态徽标、地址、plugins+size 元信息。
+  const cards = view.elements().filter(hasClass('pmp-card'))
+  ok(cards.length >= 2, `渲染出状态卡与索引源卡（${cards.length} 张）`, cards.length)
+  ok(joined.includes('示例索引'), '索引源卡片显示源标题', joined.slice(0, 400))
+  ok(joined.includes('https://example.test/index.json'), '索引源卡片显示源地址')
+  ok(/\d+ 个插件/.test(joined), '索引源卡片显示插件数量', joined.match(/\d+ 个插件[^|]*/u)?.[0])
+  ok(/KB|B/.test(joined), '索引源卡片显示缓存大小', joined.match(/[\d.]+ ?(?:KB|MB|B)/u)?.[0])
+  ok(joined.includes('缓存正常') || joined.includes('缓存过期') || joined.includes('尚未缓存'), '索引源行有状态徽标', joined.slice(0, 400))
+  eq(view.elements().filter(element => String(element.props?.className ?? '') === 'pmp-badge' && /缓存|尚未/.test(elementText(element))).length >= 1, true, '状态徽标由 SourceStatusBadge 渲染（不再崩溃）')
+  eq(joined.includes('索引源'), true, '有「索引源」分节标题')
+
+  // 工具条：全部刷新 + 自动刷新开关 + 间隔下拉（7 项，默认 4）。
+  ok(findClickable(view, text => text.trim() === '全部刷新') !== null, '有「全部刷新」按钮', texts.slice(0, 200))
+  const switches = switchButtons(view)
+  ok(switches.some(entry => entry.label === '自动刷新'), '有「自动刷新」开关', switches.map(entry => entry.label))
+  ok(switches.some(entry => entry.label === '让「发现」页使用本地缓存'), '有「让发现页使用本地缓存」接管开关', switches.map(entry => entry.label))
+  const intervalSelect = view.elements().find(element => element.type === 'select' && String(element.props?.className ?? '').includes('pmp-select'))
+  ok(intervalSelect !== undefined, '有刷新间隔下拉', view.elements().filter(element => element.type === 'select').map(element => element.props?.className))
+  eq((intervalSelect?.children ?? []).filter(child => child?.type === 'option').map(option => option.props?.value), ['1', '2', '4', '6', '8', '12', '24'], '间隔下拉 7 项')
+  eq(intervalSelect?.props?.value, '4', '间隔默认 4 小时')
+
+  // 添加源输入 + 按钮。
+  const addInput = view.elements().find(element => element.type === 'input' && String(element.props?.className ?? '').includes('pmp-input'))
+  ok(addInput !== undefined, '有添加索引源的输入框', view.elements().filter(element => element.type === 'input').map(element => element.props?.className))
+  ok(String(addInput?.props?.placeholder ?? '').includes('索引 JSON 地址'), '添加源输入框有占位文案', addInput?.props?.placeholder)
+  ok(findClickable(view, text => text.trim() === '添加') !== null, '有「添加」按钮', texts.slice(-6))
+
+  // 索引源行操作：刷新 / 复制镜像地址 / 移除。
+  for (const label of ['刷新', '复制镜像地址', '移除']) {
+    ok(findClickable(view, text => text.trim() === label) !== null, `索引源行有「${label}」按钮`, texts.slice(-10))
+  }
+  ok(joined.includes('C:/profile/.pluginmarket-plus'), '显示缓存目录', joined.slice(-300))
+  eq(loaded.state.consoleErrors.length, 0, '缓存 tab 渲染没有 console.error', loaded.state.consoleErrors)
+}
 section('渲染：候选列表 / 计数 / 进度')
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: CANDIDATES })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -927,7 +1046,7 @@ section('渲染：Host 报 running 时接上进度')
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const runningState = {
     ok: true,
     running: true,
@@ -961,7 +1080,7 @@ section('渲染：桥接失败不崩')
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   loaded.state.responses = async () => ({
     ok: false,
     status: 500,
@@ -981,7 +1100,7 @@ section('工具条单行：检查更新 → 搜索 → 齿轮 → 更新全部 �
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const t = ctx.locale.bind()
   const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
   const toolbarSignature = (view) => {
@@ -1045,7 +1164,7 @@ section('默认范围：只显示有更新的项；「显示检查失败的项�
   const rowNames = (view) => view.elements()
     .filter(element => String(element.props?.className ?? '').split(/\s+/u).includes('pmu-nameCell'))
     .map(element => elementText(element).trim())
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const hasClass = (name) => element => String(element.props?.className ?? '').split(/\s+/u).includes(name)
   const gearButton = (view) => view.elements().find(element => element.type === 'button' && element.props?.['aria-label'] === '设置')
   const scopeCandidates = [
@@ -1119,7 +1238,7 @@ section('齿轮设置菜单：三开关 / 遮罩与 Escape / 持久化')
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: CANDIDATES })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1188,7 +1307,7 @@ section('齿轮设置菜单：三开关 / 遮罩与 Escape / 持久化')
 
 section('齿轮开关解析与乐观更新（回归：POST 响应缺配置不得清零）')
 {
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   /**
    * 渲染一次并打开齿轮菜单。
    * @param {object} bridge - 假桥接。
@@ -1302,7 +1421,7 @@ section('筛选菜单结构：不在遮罩内 / 兄弟节点 / 层级与视口�
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: CANDIDATES })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1399,7 +1518,7 @@ section('menuPlacement 与内联 fixed 兑底（独立复算）')
   // 内联 fixed 兑底：给 filterWrap 注入真实 rect（按钮位于视口下方附近）→ 菜单用内联坐标定位。
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: CANDIDATES })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1420,7 +1539,7 @@ section('menuPlacement 与内联 fixed 兑底（独立复算）')
 }
 section('更新全部 / 更新已选：同一 apply 载荷；底部批量栏已移除')
 {
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
 
   /**
    * 渲染一次，按 `trigger` 走完确认流程，返回 apply 请求体。
@@ -1496,7 +1615,7 @@ section('新行 UI：插件名即详情入口 / 无详情按钮 / 无展开原�
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: CANDIDATES })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1531,7 +1650,7 @@ section('行布局：名称 → 来源 → 版本 → 状态 → 操作（来源
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: CANDIDATES })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1564,7 +1683,7 @@ section('行网格：8 列共享模板与跨行对齐')
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: CANDIDATES })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1660,7 +1779,7 @@ section('行网格：非禁用行为空占位、更新按钮右对齐')
   ]
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates, settings: { updatesIncludeDisabled: true } })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1688,7 +1807,7 @@ section('已禁用：DisabledBadge 在主状态左侧，主状态不返回 disab
   const candidates = [{ name: 'disabled-demo', current: '1.0.0', latest: '2.0.0', kind: 'npm', state: 'available', enabled: false, prerelease: false, deprecated: null }]
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates, settings: { updatesIncludeDisabled: true } })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1713,7 +1832,7 @@ section('无法检查：主状态徽标 title 带具体原因（zh/en）')
   ]
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates, settings: { updatesShowFailed: true } })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1745,7 +1864,7 @@ section('主状态唯一：预发布/已废弃不重复渲染徽标')
   ]
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1764,7 +1883,7 @@ section('交互：版本豁免入口 → 风险勾选 → 二次确认 → exemp
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: CANDIDATES })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1857,7 +1976,7 @@ section('真实 Host 契约：incompatible 对象 → 不兼容标记与豁免�
 {
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates: [REAL_INCOMPATIBLE_CANDIDATE] })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1949,7 +2068,7 @@ section('端到端：t1 数据层产出 → client 渲染（不手写 fixture）
 
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -1997,7 +2116,7 @@ section('回归：检查失败 / 无法检查 不被「不兼容」掩盖')
   ]
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates, settings: { updatesShowFailed: true } })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()
@@ -2041,7 +2160,7 @@ section('已废弃：字符串原因是真实契约，界面只用徽标（解�
 
   const ctx = makePluginContext(loaded.state)
   loaded.exports.apply(ctx)
-  const tab = loaded.state.registrations.find(entry => entry.descriptor.name === 'plugins.tab')
+  const tab = loaded.state.registrations.find(entry => entry.descriptor.id === 'pluginmarket-plus-updates')
   const bridge = makeBridge({ candidates })
   loaded.state.responses = (url, init) => bridge(url, init)
   const t = ctx.locale.bind()

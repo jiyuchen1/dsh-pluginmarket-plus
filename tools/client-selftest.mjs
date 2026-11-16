@@ -630,6 +630,20 @@ function defaultFetch(options = {}) {
       if (body?.updatesShowFailed !== undefined) settingsRef.updatesShowFailed = body.updatesShowFailed
       return json({ ok: true, saved: true, status: { config: Object.assign({}, settingsRef) } })
     }
+    if (url === '/api/pluginmarket-plus/status') {
+      return json({
+        ok: true,
+        cacheDir: 'C:/cache/pluginmarket-plus',
+        nextRefreshAt: 1_700_000_600_000,
+        writable: true,
+        sources: [
+          { id: 'src-1', url: 'https://example.com/index.json', title: '示例索引', packages: 12, fetchedAt: 1_700_000_000_000, error: null, stale: false },
+          { id: 'src-2', url: 'https://second.example.com/index.json', title: '', packages: 0, fetchedAt: null, error: 'ETIMEDOUT', stale: true },
+        ],
+        config: { autoRefresh: true, refreshIntervalHours: 4, managePluginMarket: false },
+        pluginMarket: { available: true, managed: false, indexes: ['https://example.com/index.json'], error: null },
+      })
+    }
     if (url === '/api/pluginmarket-plus/updates/check') {
       return json({
         ok: true,
@@ -760,6 +774,28 @@ function updatesRegistration() {
 }
 
 /**
+ * 取 plugins.tab 的「插件源缓存」注册。
+ * @returns {object} 注册记录。
+ */
+function cacheRegistration() {
+  const found = registrations.find(item => item.slot === 'plugins.tab' && item.descriptor.id === 'pluginmarket-plus-cache')
+  if (found === undefined) throw new Error('没有注册 plugins.tab#pluginmarket-plus-cache')
+  return found
+}
+
+/**
+ * 渲染「插件源缓存」页。
+ * @param {object} [props] - owner props 覆盖。
+ * @returns {Promise<object>} 渲染上下文（首屏数据已加载）。
+ */
+async function renderCache(props = {}) {
+  const registration = cacheRegistration()
+  const context = renderComponent(registration.component, Object.assign({ t: registration.descriptor.inject().t }, props))
+  await settle(context)
+  return context
+}
+
+/**
  * 渲染「可更新」页。
  * @param {object} [props] - owner props 覆盖。
  * @returns {Promise<object>} 渲染上下文（首屏数据已加载）。
@@ -791,12 +827,64 @@ test('席位注册与词典', async () => {
   const info = component.inspectable()
   eq(Object.keys(info.dict.zh).length, Object.keys(info.dict.en).length, 'zh/en 词典键数一致')
   for (const key of Object.keys(info.dict.zh)) {
-    if (key === 'nav') continue
     ok(typeof info.dict.en[key] === 'string', `en 词典含 ${key}`)
   }
   ok(effectLabels.some(label => label.includes('dictionaries')), '词典注册在 ctx.effect 内')
   ok(effectLabels.some(label => label.includes('styles')), '样式注册在 ctx.effect 内')
-  ok(registrations.length === 4, `注册了 4 个席位（实际 ${registrations.length}）`)
+  ok(registrations.length === 2, `只注册 2 个席位（实际 ${registrations.length}）`)
+  ok(registrations.every(item => item.slot === 'plugins.tab'), '两个席位都在 plugins.tab')
+})
+
+test('插件源缓存 tab：tab 内渲染状态卡 / 索引源 / 添加源 / 自动刷新 / 间隔 / 接管开关', async () => {
+  bootClient()
+  fakeFetch = defaultFetch()
+  const context = await renderCache()
+  const text = allText(context)
+  ok(text.includes('示例索引'), '渲染索引源标题')
+  ok(text.includes('https://example.com/index.json'), '渲染索引源地址')
+  ok(text.includes('https://second.example.com/index.json'), '渲染第二个索引源')
+  ok(text.includes('ETIMEDOUT'), '渲染索引源错误')
+  ok(text.includes('全部刷新'), '有「全部刷新」按钮')
+  ok(text.includes('自动刷新'), '有自动刷新开关')
+  ok(text.includes('刷新间隔'), '有间隔选择')
+  ok(text.includes('让发现页使用本地缓存') || text.includes('接管'), '有接管（本地缓存）开关')
+  const select = collect(context.result).find(el => el.type === 'select')
+  ok(select !== undefined, '间隔是原生 select')
+  eq(String(select.props.value), '4', '间隔默认 4 小时')
+  eq((select.rendered ?? []).filter(el => el !== null && typeof el === 'object').length, 7, '7 个间隔选项')
+  const switches = collect(context.result).filter(el => el.type === 'button' && el.props.role === 'switch')
+  eq(switches.length, 2, '两个开关（自动刷新 / 接管）')
+  // 添加索引源
+  const input = collect(context.result).find(el => el.type === 'input' && el.props.type !== 'checkbox' && el.props.type !== 'search')
+  ok(input !== undefined, '有添加索引源的输入框')
+  ok(collect(context.result).some(el => el.type === 'button' && nodeText(el).trim() === '添加'), '有「添加」按钮')
+  // 不重复标题、无设置页内边距类
+  ok(!collect(context.result).some(el => el.type === 'h2'), 'tab 内不再有重复的 h2 标题')
+  const page = collect(context.result).find(el => String(el.props?.className ?? '').includes('pmp-page'))
+  ok(String(page?.props?.className ?? '').includes('pmp-tabPage'), '根节点带 pmp-tabPage（tab 内不额外加内边距）')
+  context.unmount()
+})
+
+test('插件源缓存 tab：注册 id/order/label，设置侧注册已移除', async () => {
+  const { component } = bootClient()
+  const item = cacheRegistration()
+  eq(item.descriptor.name, 'plugins.tab', 'descriptor.name 是 plugins.tab')
+  eq(item.descriptor.id, 'pluginmarket-plus-cache', "id = pluginmarket-plus-cache")
+  eq(item.descriptor.order, 10, 'order = 10（discover 之后、可更新之前）')
+  ok(item.descriptor.order < updatesRegistration().descriptor.order, '排在「可更新」（order 20）之前')
+  eq(typeof item.descriptor.label, 'function', 'label 是 thunk')
+  eq(item.descriptor.label(), bootDictZh.cacheTab, 'label 走 ctx.locale（插件源缓存）')
+  eq(bootDictZh.cacheTab, '插件源缓存', '中文词典含「插件源缓存」')
+  eq(item.descriptor.locale, 'pluginmarket-plus', 'descriptor.locale 指向本插件命名空间')
+  eq(typeof item.component, 'function', '组件是 MarketCacheSection')
+  // 三处设置侧注册都不再存在
+  ok(!registrations.some(entry => entry.slot === 'settings.section'), 'settings.section 注册已移除')
+  ok(!registrations.some(entry => entry.slot === 'settings.plugins.tab'), 'settings.plugins.tab 注册已移除')
+  ok(!registrations.some(entry => entry.slot === 'settings.section.icon'), 'settings.section.icon 注册已移除')
+  const info = component.inspectable()
+  eq(info.dict.zh.nav, undefined, '旧 nav 文案键已删除')
+  eq(info.dict.zh.title, undefined, '旧 title 文案键已删除（tab 标签已提供标题）')
+  eq(info.dict.en.cacheTab, 'Plugin source cache', '英文词典含 Plugin source cache')
 })
 
 test('词典：删除过滤相关键，新增设置/显示检查失败键，zh=en', () => {

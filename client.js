@@ -1,9 +1,11 @@
 /**
  * dsh-pluginmarket-plus —— 客户端半边（无构建步骤，直接由 __ModuleLoader__ 装载）。
  *
- * 一个设置页：插件市场缓存。展示每个索引源的缓存状态，提供「刷新」「改刷新间隔」
- * 「让发现页使用本地缓存」等操作。所有数据都来自 Host 的 `/api/pluginmarket-plus/*`
- * （经 connection 精确路由，只有 owner 浏览器能访问）。
+ * 插件页两个标签：`pluginmarket-plus-cache`（插件源缓存）与 `pluginmarket-plus-updates`
+ * （可更新）。缓存标签展示每个索引源的缓存状态，提供「刷新」「改刷新间隔」
+ * 「让发现页使用本地缓存」等操作；「可更新」标签集中列出有更新的 bundle。
+ * 所有数据都来自 Host 的 `/api/pluginmarket-plus/*`（经 connection 精确路由，
+ * 只有 owner 浏览器能访问）。
  *
  * 约束：工厂函数无副作用；样式/字典/席位注册全部放进 apply 并用 ctx.effect 清理；
  * 只 require('react')，不 import 任何 @deepseek-ai Client 包。
@@ -26,13 +28,15 @@ window.__ModuleLoader__.load({
     /** 席位 id 与顺序（排在自带的 Installed / Discover 之后）。 */
     const UPDATES_ID = 'pluginmarket-plus-updates'
     const UPDATES_ORDER = 20
+    /** 「插件源缓存」tab：排在 discover 之后、「可更新」之前。 */
+    const CACHE_ID = 'pluginmarket-plus-cache'
+    const CACHE_ORDER = 10
     /** 进度轮询间隔（毫秒）。 */
     const POLL_MS = 700
 
     const I18N = {
       zh: {
-        nav: '插件市场缓存',
-        title: '插件市场缓存',
+        cacheTab: '插件源缓存',
         intro: '把「插件 → 发现」读取的索引 JSON 缓存到本地磁盘，定时或手动刷新。在「发现 → 索引源」或本页增删索引源都会自动同步；开启下方开关后，发现页会改用本地镜像，搜索不再因上游索引超时而失败。',
         loading: '读取中…',
         failed: '读取失败：{error}',
@@ -182,8 +186,7 @@ window.__ModuleLoader__.load({
         stageSkipped: '已跳过',
       },
       en: {
-        nav: 'Plugin market cache',
-        title: 'Plugin market cache',
+        cacheTab: 'Plugin source cache',
         intro: 'Caches the index JSON that Plugins → Discover reads, on local disk, refreshed on a schedule or on demand. Adding or removing a source in Discover → Index sources or on this page stays in sync; turn on the switch below to point Discover at the local mirror, so searches no longer fail on an upstream index timeout.',
         loading: 'Loading…',
         failed: 'Failed to load: {error}',
@@ -336,7 +339,8 @@ window.__ModuleLoader__.load({
 
     const CSS = [
       '.pmp-page{display:flex;flex-direction:column;gap:14px;width:100%;max-width:760px;color:var(--dsw-alias-label-primary);font:inherit}',
-      '.pmp-title{margin:0;font-size:16px;font-weight:600;line-height:24px}',
+      // 插件页 tab 内：不设额外内边距/最大宽度（避免与设置页样式冲突）。
+      '.pmp-tabPage{max-width:none;min-width:0;padding:0}',
       '.pmp-intro{margin:0;font-size:13px;line-height:20px;color:var(--dsw-alias-label-secondary)}',
       '.pmp-notice{display:flex;align-items:center;gap:8px;border-radius:var(--dsw-radius-md);padding:8px 10px;font-size:12px;line-height:18px;overflow-wrap:anywhere}',
       '.pmp-notice[data-tone="ok"]{background:color-mix(in srgb, var(--dsw-alias-state-success-primary) 10%, transparent);color:var(--dsw-alias-state-success-primary)}',
@@ -589,11 +593,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 状态徽标。
+     * 索引源缓存状态徽标（与「可更新」的行状态徽标同名会互相覆盖，故加 Source 前缀）。
      * @param {{state: string, t: Function}} props - 源状态与翻译函数。
      * @returns {object} React 元素。
      */
-    function StatusBadge({ state, t }) {
+    function SourceStatusBadge({ state, t }) {
       const tone = state === 'ok' ? 'ok' : state === 'stale' ? 'warn' : state === 'error' ? 'bad' : 'idle'
       const label = state === 'ok' ? t('statusOk') : state === 'stale' ? t('statusStale') : state === 'error' ? t('statusError') : t('statusEmpty')
       return h('span', { className: 'pmp-badge', 'data-tone': tone },
@@ -749,8 +753,8 @@ window.__ModuleLoader__.load({
         }
       }
 
-      return h('div', { className: 'pmp-page' },
-        h('h2', { className: 'pmp-title' }, t('title')),
+      // 作为 plugins.tab 的内容：tab 标签已是「插件源缓存」，这里不再重复标题。
+      return h('div', { className: 'pmp-page pmp-tabPage' },
         h('p', { className: 'pmp-intro' }, t('intro')),
 
         notice !== null && h('p', { className: 'pmp-notice', 'data-tone': notice.tone }, notice.text),
@@ -800,7 +804,7 @@ window.__ModuleLoader__.load({
         sources.map((source) => h('div', { className: 'pmp-card', key: source.id },
           h('div', { className: 'pmp-cardHead' },
             h('h3', { className: 'pmp-cardTitle' }, source.title || t('unknownTitle')),
-            h(StatusBadge, { state: source.state, t }),
+            h(SourceStatusBadge, { state: source.state, t }),
             source.refreshing === true && h('span', { className: 'pmp-badge' }, t('refreshing')),
           ),
           h('p', { className: 'pmp-url' }, source.url),
@@ -2384,29 +2388,6 @@ window.__ModuleLoader__.load({
       return status > 0 ? `HTTP ${status}` : 'request failed'
     }
 
-    /**
-     * 设置导航图标（可选席位）。
-     * @param {{size?: number, active?: boolean}} props - 图标尺寸与选中态。
-     * @returns {object} React 元素。
-     */
-    function CacheIcon({ size, active }) {
-      return h('svg', {
-        width: size ?? 16,
-        height: size ?? 16,
-        viewBox: '0 0 24 24',
-        fill: 'none',
-        stroke: 'currentColor',
-        strokeWidth: 1.7,
-        strokeLinecap: 'round',
-        strokeLinejoin: 'round',
-        'aria-hidden': true,
-        style: { color: active === true ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-tertiary)' },
-      },
-      h('ellipse', { cx: 12, cy: 6.5, rx: 7, ry: 3 }),
-      h('path', { d: 'M5 6.5v11c0 1.66 3.13 3 7 3s7-1.34 7-3v-11' }),
-      h('path', { d: 'M5 12c0 1.66 3.13 3 7 3s7-1.34 7-3' }))
-    }
-
     return {
       inject: ['slots', 'locale'],
       /** 纯逻辑/常量出口，仅供自检脚本读取；不参与运行时行为。 */
@@ -2425,30 +2406,15 @@ window.__ModuleLoader__.load({
 
         const t = ctx.locale.bind(NS)
 
-        ctx.slots.inject('settings.section', () => ctx.slots.register({
-          name: 'settings.section',
-          id: 'pluginmarket-plus',
-          order: 41,
-          label: () => t('nav'),
+        // 插件页（Plugins）「插件源缓存」标签：排在自带的 Discover 之后、「可更新」之前。
+        ctx.slots.inject(UPDATES_SLOT, () => ctx.slots.register({
+          name: UPDATES_SLOT,
+          id: CACHE_ID,
+          order: CACHE_ORDER,
+          label: () => t('cacheTab'),
           locale: NS,
           inject: () => ({ t }),
         }, MarketCacheSection))
-
-        // 也放进「插件」设置页的页签里，和「发现」在同一处。
-        ctx.slots.inject('settings.plugins.tab', () => ctx.slots.register({
-          name: 'settings.plugins.tab',
-          id: 'pluginmarket-plus',
-          order: 55,
-          label: () => t('nav'),
-          locale: NS,
-          inject: () => ({ t }),
-        }, MarketCacheSection))
-
-        ctx.slots.inject('settings.section.icon', () => ctx.slots.register({
-          name: 'settings.section.icon',
-          id: 'pluginmarket-plus',
-          order: 41,
-        }, CacheIcon))
 
         // 插件页（Plugins）新增「可更新」标签：排在自带的 Installed / Discover 之后。
         // 数据只走同源 /api/pluginmarket-plus/updates*；「详情」复用官方详情页。
