@@ -1,7 +1,7 @@
 {
   "name": "dsh-pluginmarket-plus",
-  "version": "0.2.0",
-  "description": "Local disk cache for plugin market index JSON: manual and scheduled refresh, plus a local mirror that the built-in Discover page can read instead of the slow upstream indexes.",
+  "version": "0.2.1",
+  "description": "Plugin market enhancements for DeepSeek Harness: cache the market index JSON on local disk with a local mirror for the Discover page, and check or batch-update installed plugins with progress, cancellation and version exemptions.",
   "type": "module",
   "main": "./lib/index.js",
   "icon": "icon.svg",
